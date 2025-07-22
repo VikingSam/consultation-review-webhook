@@ -1,7 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 import requests, openai, os, re, subprocess
 from pathlib import Path
+from datetime import datetime
 
 app = FastAPI()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -10,64 +11,69 @@ class Payload(BaseModel):
     file_url: str
     filename: str
 
-MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB
 
 @app.post("/webhook")
-async def review_consult(payload: Payload):
-    try:
-        print(f"👉 Received: {payload.filename}")
-        print(f"📥 Downloading: {payload.file_url}")
-        
-        # Download
-        r = requests.get(payload.file_url)
-        if r.status_code != 200:
-            return {"error": f"Download failed. Status: {r.status_code}"}
+async def webhook(payload: Payload, background_tasks: BackgroundTasks):
+    print(f"📦 Received file: {payload.filename}")
+    background_tasks.add_task(process_audio, payload)
+    return {"status": "✅ Received", "file": payload.filename}
 
-        local_path = f"/tmp/{payload.filename}"
+def process_audio(payload: Payload):
+    try:
+        url = payload.file_url
+        filename = payload.filename
+        local_path = f"/tmp/{filename}"
+
+        print(f"⬇️ Downloading file from {url}")
+        r = requests.get(url)
+        if r.status_code != 200:
+            print(f"❌ Failed to download: {r.status_code}")
+            return
         with open(local_path, "wb") as f:
             f.write(r.content)
 
-        total_size = os.path.getsize(local_path)
-        print(f"📏 File size: {total_size} bytes")
+        file_size = os.path.getsize(local_path)
+        print(f"📏 Size: {file_size} bytes")
+
+        base = Path(local_path).stem
+        transcript = ""
 
         # Split if over 25MB
-        if total_size > MAX_FILE_SIZE:
-            print("⚠️ File too large. Splitting...")
-            base = Path(local_path).stem
-            split_base = f"/tmp/{base}_chunk_%03d.m4a"
+        if file_size > MAX_FILE_SIZE:
+            print("⚠️ File too large, splitting...")
+            split_base = f"/tmp/{base}_part_%03d.m4a"
             subprocess.run([
                 "ffmpeg", "-i", local_path,
-                "-f", "segment", "-segment_time", "300",
+                "-f", "segment", "-segment_time", "300",  # 5 min chunks
                 "-c", "copy", split_base
             ], check=True)
-            parts = sorted(Path("/tmp").glob(f"{base}_chunk_*.m4a"))
+            parts = sorted(Path("/tmp").glob(f"{base}_part_*.m4a"))
         else:
             parts = [Path(local_path)]
 
-        # Transcribe each part
-        full_text = ""
         for i, part in enumerate(parts):
-            print(f"🔍 Transcribing chunk {i+1}: {part.name}")
+            print(f"🔍 Transcribing part {i+1}/{len(parts)}: {part.name}")
             with open(part, "rb") as f:
                 result = openai.Audio.transcribe("whisper-1", f)
-            full_text += result["text"] + "\n"
+            transcript += result["text"] + "\n"
 
-        # Evaluate transcript
-        txt = full_text
-        wc = len(txt.split())
-        duration_flag = "⚠️ Under 20 minutes" if wc/150 < 20 else ""
+        print("📄 Transcript complete. Evaluating...")
+
+        wc = len(transcript.split())
+        duration_flag = "⚠️ Under 20 minutes" if wc / 150 < 20 else ""
 
         issues = []
-        if not re.search(r'goal|objective', txt, re.I): issues.append("Missing probing questions")
-        if not re.search(r'ancillary|supplement', txt, re.I): issues.append("No ancillary meds")
-        if not re.search(r'\d+ ?(mg|ml)|daily|weekly', txt, re.I): issues.append("No dosage/treatment plan")
-        if not re.search(r'verify.*(address|phone)', txt, re.I): issues.append("No address/phone verification")
+        if not re.search(r'goal|objective', transcript, re.I): issues.append("Missing probing questions")
+        if not re.search(r'ancillary|supplement', transcript, re.I): issues.append("No ancillary meds")
+        if not re.search(r'\d+ ?(mg|ml)|daily|weekly', transcript, re.I): issues.append("No dosage/treatment plan")
+        if not re.search(r'verify.*(address|phone)', transcript, re.I): issues.append("No address/phone verification")
 
-        questions = re.findall(r'Patient: (.*\?)', txt, re.I)
-        answered = [q for q in questions if re.search(re.escape(q), txt.split("Provider:")[-1], re.I)]
+        questions = re.findall(r'Patient: (.*\?)', transcript, re.I)
+        answered = [q for q in questions if re.search(re.escape(q), transcript.split("Provider:")[-1], re.I)]
         unanswered = set(questions) - set(answered)
 
-        behavior = "🚩 Behavior Flag" if re.search(r'(yell|argue|angry|hostile)', txt, re.I) else ""
+        behavior = "🚩 Behavior Flag" if re.search(r'(yell|argue|angry|hostile)', transcript, re.I) else ""
         proceed = "✅ Proceed: Yes" if not issues else "❌ Proceed: No"
 
         summary = f"""
@@ -76,7 +82,7 @@ async def review_consult(payload: Payload):
 {behavior}
 
 📋 Summary:
-{txt[:1500]}...
+{transcript[:1500]}...
 
 ❓ Unanswered:
 {list(unanswered) if unanswered else 'None'}
@@ -84,13 +90,12 @@ async def review_consult(payload: Payload):
 🔍 Evaluation:
 {', '.join(issues) if issues else 'All checks passed.'}
 """
-        out = f"/tmp/Approved - {payload.filename}.txt"
-        with open(out, "w") as f:
-            f.write(txt + "\n\n---\n\n" + summary)
 
-        print(f"✅ Done: {out}")
-        return {"result": proceed, "file": out}
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output_file = f"/tmp/Approved - {base}_{timestamp}.txt"
+        with open(output_file, "w") as f:
+            f.write(transcript + "\n\n---\n\n" + summary)
 
+        print(f"✅ Done: {output_file}")
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        return {"error": str(e)}
+        print(f"❌ Exception: {str(e)}")

@@ -4,5 +4,5 @@ requests
 openai==0.28
 pydantic
 google-auth
-google-auth-oauthlib
 google-api-python-client
+google-auth-oauthlib

@@ -1,43 +1,41 @@
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
-import requests, openai, os, re, subprocess, smtplib
-from pathlib import Path
-from datetime import datetime
+import requests, openai, os, re, smtplib
 from email.mime.text import MIMEText
-
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from datetime import datetime
+from pathlib import Path
 
 app = FastAPI()
-openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Email + Drive Config
+# Config
+openai.api_key = os.getenv("OPENAI_API_KEY")
 SMTP_SERVER = os.getenv("SMTP_SERVER")
 SMTP_PORT = int(os.getenv("SMTP_PORT"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 EMAIL_TO = "Sam@VikingAlternative.com"
 EMAIL_FROM = SMTP_USERNAME
-DRIVE_FOLDER_ID = "1vgPJImWT07FEQKmsv8AuHZMxM_-70lzD"
+DRIVE_FOLDER_ID = "1vgPJImWT07FEQKmsv8AuHZMxM_-70lzD"  # your Transcribed Files folder
 
 class Payload(BaseModel):
     file_url: str
     filename: str
 
-MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB
-
 @app.post("/webhook")
-async def webhook(payload: Payload, background_tasks: BackgroundTasks):
-    background_tasks.add_task(process_audio, payload)
-    return {"status": "✅ Received", "file": payload.filename}
+async def handle_vtt(payload: Payload, background_tasks: BackgroundTasks):
+    background_tasks.add_task(process_vtt, payload)
+    return {"status": "✅ VTT file received", "file": payload.filename}
 
 def send_email(subject, body):
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_FROM
-    msg["To"] = EMAIL_TO
     try:
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = EMAIL_FROM
+        msg["To"] = EMAIL_TO
+
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
@@ -47,93 +45,96 @@ def send_email(subject, body):
         print(f"❌ Email failed: {e}")
 
 def upload_to_drive(file_path, filename):
-    SCOPES = ['https://www.googleapis.com/auth/drive.file']
     creds = service_account.Credentials.from_service_account_file(
-        '/etc/secrets/credentials.json', scopes=SCOPES
+        "/etc/secrets/credentials.json", scopes=['https://www.googleapis.com/auth/drive.file']
     )
-    service = build('drive', 'v3', credentials=creds)
-    file_metadata = {
-        'name': filename,
-        'parents': [DRIVE_FOLDER_ID]
-    }
-    media = MediaFileUpload(file_path, mimetype='text/plain')
-    uploaded = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-    print(f"📤 Uploaded to Drive: {uploaded.get('id')}")
+    service = build("drive", "v3", credentials=creds)
+    file_metadata = {"name": filename, "parents": [DRIVE_FOLDER_ID]}
+    media = MediaFileUpload(file_path, mimetype="text/plain")
+    file = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+    print(f"📤 Uploaded to Drive: {file.get('id')}")
 
-def process_audio(payload: Payload):
+def clean_vtt(raw_text):
+    lines = raw_text.splitlines()
+    result = []
+    for line in lines:
+        if re.match(r"^\d\d:\d\d:\d\d\.\d\d\d -->", line):
+            continue  # remove timestamps
+        if line.strip().isdigit():
+            continue  # remove cue numbers
+        if line.strip() == "":
+            continue  # skip blanks
+        result.append(line.strip())
+    return " ".join(result)
+
+def evaluate_with_gpt(transcript):
+    prompt = f"""
+You are a medical consultation evaluator. Here's a transcript of a provider-patient session:
+
+Your tasks:
+- Evaluate quality on a scale of 1 to 10
+- Provide a short summary
+- Flag if:
+  - Patient goals were not asked
+  - Ancillary meds not discussed
+  - Address/phone not verified
+  - Follow-up or labs not mentioned
+  - Provider avoided or missed answering questions
+  - Tone was confrontational
+Return all results clearly labeled.
+
+Transcript:
+\"\"\"
+{transcript}
+\"\"\"
+"""
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"❌ GPT evaluation failed: {str(e)}"
+
+def process_vtt(payload: Payload):
     try:
         url = payload.file_url
         filename = payload.filename
         local_path = f"/tmp/{filename}"
 
+        # Download the VTT file
         r = requests.get(url)
         if r.status_code != 200:
-            raise Exception(f"Download failed: {r.status_code}")
+            raise Exception(f"Failed to download: {r.status_code}")
         with open(local_path, "wb") as f:
             f.write(r.content)
 
-        base = Path(local_path).stem
-        file_size = os.path.getsize(local_path)
-        transcript = ""
+        print(f"⬇️ Downloaded {filename}")
 
-        if file_size > MAX_FILE_SIZE:
-            split_base = f"/tmp/{base}_part_%03d.m4a"
-            subprocess.run([
-                "ffmpeg", "-i", local_path,
-                "-f", "segment", "-segment_time", "300",
-                "-c", "copy", split_base
-            ], check=True)
-            parts = sorted(Path("/tmp").glob(f"{base}_part_*.m4a"))
-        else:
-            parts = [Path(local_path)]
+        # Read and clean the transcript
+        with open(local_path, "r", encoding="utf-8") as f:
+            raw_vtt = f.read()
+        clean_text = clean_vtt(raw_vtt)
 
-        for part in parts:
-            with open(part, "rb") as f:
-                result = openai.Audio.transcribe("whisper-1", f)
-            transcript += result["text"] + "\n"
+        # Evaluate with GPT
+        result = evaluate_with_gpt(clean_text)
 
-        # Evaluation
-        wc = len(transcript.split())
-        duration_flag = "⚠️ Under 20 minutes" if wc / 150 < 20 else ""
-
-        issues = []
-        if not re.search(r'goal|objective', transcript, re.I): issues.append("Missing probing questions")
-        if not re.search(r'ancillary|supplement', transcript, re.I): issues.append("No ancillary meds")
-        if not re.search(r'\d+ ?(mg|ml)|daily|weekly', transcript, re.I): issues.append("No dosage/treatment plan")
-        if not re.search(r'verify.*(address|phone)', transcript, re.I): issues.append("No address/phone verification")
-
-        questions = re.findall(r'Patient: (.*\?)', transcript, re.I)
-        answered = [q for q in questions if re.search(re.escape(q), transcript.split("Provider:")[-1], re.I)]
-        unanswered = set(questions) - set(answered)
-
-        behavior = "🚩 Behavior Flag" if re.search(r'(yell|argue|angry|hostile)', transcript, re.I) else ""
-        proceed = "✅ Proceed: Yes" if not issues else "❌ Proceed: No"
-
-        summary = f"""
-{proceed}
-{duration_flag}
-{behavior}
-
-📋 Summary:
-{transcript[:1500]}...
-
-❓ Unanswered:
-{list(unanswered) if unanswered else 'None'}
-
-🔍 Evaluation:
-{', '.join(issues) if issues else 'All checks passed.'}
-"""
+        # Save results to file
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        output_file = f"/tmp/Approved - {base}_{timestamp}.txt"
-        with open(output_file, "w") as f:
-            f.write(transcript + "\n\n---\n\n" + summary)
+        txt_name = f"Review - {Path(filename).stem}_{timestamp}.txt"
+        output_path = f"/tmp/{txt_name}"
+        with open(output_path, "w") as f:
+            f.write(result)
 
-        upload_to_drive(output_file, Path(output_file).name)
-        send_email(
-            f"✅ Transcript Finished: {filename}",
-            f"The transcript was completed and uploaded to Google Drive:\n\nFilename: {Path(output_file).name}\n\nStatus: {proceed}"
-        )
+        print("🧠 Evaluation complete")
+
+        # Upload to Google Drive
+        upload_to_drive(output_path, txt_name)
+
+        # Send email
+        send_email(f"✅ Consultation Review: {filename}", result)
 
     except Exception as e:
         print(f"❌ Error: {e}")
-        send_email("❌ Transcript Failed", str(e))
+        send_email("❌ Failed VTT Review", str(e))

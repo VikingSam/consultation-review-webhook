@@ -11,14 +11,12 @@ from datetime import datetime
 import re
 
 # === CONFIGURATION (LOADED FROM ENVIRONMENT VARIABLES) ===
-# It is a major security risk to write secrets directly in the code.
-# Load them from environment variables instead. You will set these in your hosting provider's dashboard (e.g., Render.com).
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ZOOM_SECRET_TOKEN = os.getenv("ZOOM_SECRET_TOKEN") # This is the "Secret Token" from your Zoom App's "Feature" page
+ZOOM_SECRET_TOKEN = os.getenv("ZOOM_SECRET_TOKEN")
 
 # Ensure the OpenAI API key is set
 openai.api_key = OPENAI_API_KEY
@@ -75,7 +73,6 @@ def extract_provider(text):
     match = re.search(r"Provider:\s*(.+)", text)
     if match:
         name = match.group(1).strip()
-        # Sanitize the name for use in a filename
         return re.sub(r"[^\w\-]", "_", name)
     return "Unknown_Provider"
 
@@ -90,7 +87,7 @@ def upload_to_drive(filename, filedata):
         }
         files = {
             "data": ("metadata", json.dumps(metadata), "application/json"),
-            "file": (filename, filedata, "text/plain") # Use the actual filename here
+            "file": (filename, filedata, "text/plain")
         }
         response = requests.post(
             "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
@@ -98,7 +95,7 @@ def upload_to_drive(filename, filedata):
             files=files
         )
         print("📤 Google Drive upload response:", response.status_code, response.text)
-        response.raise_for_status() # Raise an exception for bad status codes
+        response.raise_for_status()
     except Exception as e:
         print(f"❌ Error uploading to Google Drive: {e}")
 
@@ -109,8 +106,6 @@ async def zoom_webhook(request: Request):
     body = await request.json()
     event = body.get("event")
 
-    # --- Webhook Handshake for Zoom ---
-    # This part is for Zoom to verify the URL is valid when you first set it up.
     if event == "endpoint.url_validation":
         plain_token = body.get("payload", {}).get("plainToken", "")
         encrypted_token = hmac.new(
@@ -120,29 +115,30 @@ async def zoom_webhook(request: Request):
         ).hexdigest()
         return JSONResponse(content={"plainToken": plain_token, "encryptedToken": encrypted_token})
 
-    # --- THE FIX: Listen for the correct event ---
-    # The original code listened for "recording.completed".
-    # The correct event is "recording.transcript_completed".
     if event == "recording.transcript_completed":
-        payload = body.get("payload", {}).get("object", {})
-        recording_files = payload.get("recording_files", [])
+        payload = body.get("payload", {})
+        recording_files = payload.get("object", {}).get("recording_files", [])
         
         for file in recording_files:
-            # We only care about the transcript file
             if file.get("file_type") == "TRANSCRIPT":
                 download_url = file.get("download_url")
                 # The download_token is provided in the webhook payload for authorization
-                download_token = body.get("payload", {}).get("download_token")
+                download_token = payload.get("download_token")
+                
+                # --- DEBUGGING LINES START ---
+                print("--- STARTING DOWNLOAD PROCESS ---")
+                print(f"ℹ️ Attempting to download from: {download_url}")
+                print(f"ℹ️ Using download_token: {download_token}") # This will show if the token is missing (None)
+                # --- DEBUGGING LINES END ---
                 
                 headers = {"Authorization": f"Bearer {download_token}"}
                 
                 try:
-                    # Download the transcript file
                     transcript_response = requests.get(download_url, headers=headers)
+                    print(f"ℹ️ Download request sent. Status code: {transcript_response.status_code}") # Log the response status
                     transcript_response.raise_for_status()
                     transcript_text = transcript_response.text
 
-                    # Analyze the transcript with OpenAI
                     gpt_response = openai.ChatCompletion.create(
                         model="gpt-4o",
                         messages=[
@@ -154,20 +150,18 @@ async def zoom_webhook(request: Request):
                     )
                     summary = gpt_response['choices'][0]['message']['content'].strip()
                     
-                    # Create filename and upload the summary
                     provider = extract_provider(summary)
                     timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
                     filename = f"{timestamp} - {provider}_Consultation_Summary.txt"
 
                     upload_to_drive(filename, summary.encode("utf-8"))
                     
-                    print(f"✅ Successfully processed transcript for meeting {payload.get('topic')}")
+                    print(f"✅ Successfully processed transcript for meeting {payload.get('object', {}).get('topic')}")
                     return JSONResponse(content={"status": "processed"}, status_code=200)
 
                 except Exception as e:
                     print(f"❌ An error occurred during processing: {e}")
                     return JSONResponse(content={"status": "error", "detail": str(e)}, status_code=500)
 
-    # If the event is not the one we're looking for, just ignore it.
     print(f"ℹ️ Received and ignored event: {event}")
     return JSONResponse(content={"message": "Event ignored"}, status_code=200)

@@ -5,28 +5,35 @@ import hashlib
 import requests
 import openai
 import json
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from datetime import datetime
 import re
 
-# === CONFIGURATION (LOADED FROM ENVIRONMENT VARIABLES) ===
-GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ZOOM_SECRET_TOKEN = os.getenv("ZOOM_SECRET_TOKEN")
+# === LOAD CONFIGURATION FROM ENVIRONMENT VARIABLES ===
+# A function to ensure all required environment variables are set on startup.
+def load_env_vars():
+    required_vars = [
+        "GOOGLE_DRIVE_FOLDER_ID", "OPENAI_API_KEY", "ZOOM_SECRET_TOKEN",
+        "ZOOM_ACCOUNT_ID", "ZOOM_CLIENT_ID", "ZOOM_CLIENT_SECRET",
+        "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"
+    ]
+    config = {}
+    for var in required_vars:
+        value = os.getenv(var)
+        if not value:
+            raise ValueError(f"❌ Missing required environment variable: {var}")
+        config[var] = value
+    return config
 
-# --- Zoom Server-to-Server OAuth Credentials ---
-ZOOM_ACCOUNT_ID = os.getenv("ZOOM_ACCOUNT_ID")
-ZOOM_CLIENT_ID = os.getenv("ZOOM_CLIENT_ID")
-ZOOM_CLIENT_SECRET = os.getenv("ZOOM_CLIENT_SECRET")
+try:
+    config = load_env_vars()
+except ValueError as e:
+    print(e)
+    exit(1) # Exit if configuration is missing
 
-# --- Google OAuth Credentials ---
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
-
-# Ensure the OpenAI API key is set
-openai.api_key = OPENAI_API_KEY
+# Set the OpenAI API key
+openai.api_key = config["OPENAI_API_KEY"]
 
 # The prompt for analyzing the consultation
 CONSULTATION_FRAMEWORK = """
@@ -63,9 +70,9 @@ def get_google_access_token():
     """Refreshes the Google API access token using the refresh token."""
     token_url = "https://oauth2.googleapis.com/token"
     data = {
-        "client_id": GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
-        "refresh_token": GOOGLE_REFRESH_TOKEN,
+        "client_id": config["GOOGLE_CLIENT_ID"],
+        "client_secret": config["GOOGLE_CLIENT_SECRET"],
+        "refresh_token": config["GOOGLE_REFRESH_TOKEN"],
         "grant_type": "refresh_token"
     }
     response = requests.post(token_url, data=data)
@@ -78,9 +85,10 @@ def get_google_access_token():
 def get_zoom_access_token():
     """Gets a Server-to-Server OAuth token from Zoom."""
     token_url = "https://zoom.us/oauth/token"
-    params = {"grant_type": "account_credentials", "account_id": ZOOM_ACCOUNT_ID}
+    params = {"grant_type": "account_credentials", "account_id": config["ZOOM_ACCOUNT_ID"]}
+    auth = (config["ZOOM_CLIENT_ID"], config["ZOOM_CLIENT_SECRET"])
     
-    response = requests.post(token_url, auth=(ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET), params=params)
+    response = requests.post(token_url, auth=auth, params=params)
     
     if response.status_code == 200:
         print("✅ Successfully obtained Zoom access token.")
@@ -104,7 +112,7 @@ def upload_to_drive(filename, filedata):
         headers = {"Authorization": f"Bearer {access_token}"}
         metadata = {
             "name": filename,
-            "parents": [GOOGLE_DRIVE_FOLDER_ID]
+            "parents": [config["GOOGLE_DRIVE_FOLDER_ID"]]
         }
         files = {
             "data": ("metadata", json.dumps(metadata), "application/json"),
@@ -130,7 +138,7 @@ async def zoom_webhook(request: Request):
     if event == "endpoint.url_validation":
         plain_token = body.get("payload", {}).get("plainToken", "")
         encrypted_token = hmac.new(
-            ZOOM_SECRET_TOKEN.encode(),
+            config["ZOOM_SECRET_TOKEN"].encode(),
             plain_token.encode(),
             hashlib.sha256
         ).hexdigest()
@@ -145,17 +153,13 @@ async def zoom_webhook(request: Request):
                 download_url = file.get("download_url")
                 
                 try:
-                    # --- THE FINAL FIX ---
-                    # Get a powerful Server-to-Server token to authorize the download.
                     zoom_access_token = get_zoom_access_token()
                     headers = {"Authorization": f"Bearer {zoom_access_token}"}
                     
-                    # Download the transcript using the new, powerful token
                     transcript_response = requests.get(download_url, headers=headers)
                     transcript_response.raise_for_status()
                     transcript_text = transcript_response.text
 
-                    # Analyze the transcript with OpenAI
                     gpt_response = openai.ChatCompletion.create(
                         model="gpt-4o",
                         messages=[
@@ -167,7 +171,6 @@ async def zoom_webhook(request: Request):
                     )
                     summary = gpt_response['choices'][0]['message']['content'].strip()
                     
-                    # Create filename and upload the summary
                     provider = extract_provider(summary)
                     timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
                     filename = f"{timestamp} - {provider}_Consultation_Summary.txt"
@@ -183,4 +186,3 @@ async def zoom_webhook(request: Request):
 
     print(f"ℹ️ Received and ignored event: {event}")
     return JSONResponse(content={"message": "Event ignored"}, status_code=200)
-```

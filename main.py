@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from datetime import datetime
 import re
+from weasyprint import HTML # --- NEW: Import library for PDF generation ---
 
 # === LOAD CONFIGURATION FROM ENVIRONMENT VARIABLES ===
 # A function to ensure all required environment variables are set on startup.
@@ -109,6 +110,11 @@ HTML_TEMPLATE = """
         h1 {{
             text-align: center;
             margin-bottom: 30px;
+        }}
+        hr {{
+            border: none;
+            border-top: 1px solid #dee2e6;
+            margin: 30px 0;
         }}
         .overview {{
             background-color: #ecf0f1;
@@ -273,20 +279,25 @@ async def process_transcript_task(body: dict):
         )
         summary_markdown = gpt_response['choices'][0]['message']['content'].strip()
         
+        # Convert the AI's Markdown response to basic HTML for the report
         html_content = summary_markdown.replace('\n', '<br>')
         html_content = re.sub(r'# (.*)', r'<h1>\1</h1>', html_content)
         html_content = re.sub(r'## (.*)', r'<h2>\1</h2>', html_content)
         html_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html_content)
         html_content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html_content)
+        html_content = re.sub(r'---', r'<hr>', html_content)
         html_content = re.sub(r'❌ Not addressed.', r'<span class="not-addressed">❌ Not addressed.</span>', html_content)
         
         final_html = HTML_TEMPLATE.format(report_content=html_content)
         
+        # --- NEW: Convert HTML to PDF ---
+        pdf_bytes = HTML(string=final_html).write_pdf()
+        
         provider = extract_provider(summary_markdown)
         timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
-        filename = f"{timestamp} - {provider}_Consultation_Summary.html"
+        filename = f"{timestamp} - {provider}_Consultation_Summary.pdf" # Changed to .pdf
 
-        upload_to_drive(filename, final_html.encode("utf-8"), mime_type="text/html")
+        upload_to_drive(filename, pdf_bytes, mime_type="application/pdf")
         
         print(f"✅ Successfully processed transcript for meeting {meeting_object.get('topic')}")
 

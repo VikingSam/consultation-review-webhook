@@ -127,7 +127,6 @@ def upload_to_drive(filename, filedata):
         response.raise_for_status()
     except Exception as e:
         print(f"❌ Error uploading to Google Drive: {e}")
-        # Re-raise the exception to be caught by the main handler
         raise e
 
 
@@ -153,14 +152,12 @@ async def zoom_webhook(request: Request):
             
             # --- THE FINAL FIX: Correctly handle all Meeting and Webinar types ---
             meeting_type = meeting_object.get("type")
+            entity_id = meeting_object.get("uuid")
 
-            # Types 1, 2, 3, 4, and 8 are all meetings (Instant, Scheduled, Recurring, PMI)
-            if meeting_type in [1, 2, 3, 4, 8]: 
+            if meeting_type in [1, 2, 3, 4, 8]: # It's a meeting (Instant, Scheduled, Recurring, PMI)
                 entity_type = "meetings"
-                entity_id = meeting_object.get("uuid")
             elif meeting_type in [5, 6, 9]: # It's a webinar
                 entity_type = "webinars"
-                entity_id = meeting_object.get("uuid")
             else:
                 print(f"ℹ️ Ignoring unknown meeting type: {meeting_type}")
                 return JSONResponse(content={"message": "Event for unknown type ignored"}, status_code=200)
@@ -168,7 +165,7 @@ async def zoom_webhook(request: Request):
             if not entity_id:
                 raise ValueError(f"Entity ID (UUID) not found in webhook payload for type {entity_type}")
             
-            # Per Zoom API docs, UUIDs with slashes must be double URL encoded.
+            # Per Zoom API docs, UUIDs with slashes must be double URL encoded to work in the API path.
             if entity_id.startswith('/') or '//' in entity_id:
                 entity_id = requests.utils.quote(requests.utils.quote(entity_id, safe=''))
 
@@ -177,11 +174,10 @@ async def zoom_webhook(request: Request):
             zoom_access_token = get_zoom_access_token()
             headers = {"Authorization": f"Bearer {zoom_access_token}"}
             
+            # Use the Zoom API to get recording details, which provides a new, authorized download URL
             recording_details_url = f"https://api.zoom.us/v2/{entity_type}/{entity_id}/recordings"
             
             recording_details_response = requests.get(recording_details_url, headers=headers)
-            if recording_details_response.status_code != 200:
-                print(f"❌ Zoom API Error Response Body: {recording_details_response.text}")
             recording_details_response.raise_for_status()
             recording_details = recording_details_response.json()
 
@@ -197,10 +193,12 @@ async def zoom_webhook(request: Request):
             download_url = transcript_file["download_url"]
             print(f"ℹ️ Found authorized download URL via API: {download_url}")
 
+            # Download the transcript using the same powerful token
             transcript_response = requests.get(download_url, headers=headers)
             transcript_response.raise_for_status()
             transcript_text = transcript_response.text
 
+            # Analyze the transcript with OpenAI
             gpt_response = openai.ChatCompletion.create(
                 model="gpt-4o",
                 messages=[
@@ -225,10 +223,11 @@ async def zoom_webhook(request: Request):
             print(f"❌ HTTP error occurred: {http_err}")
             if http_err.response:
                 print(f"❌ Zoom API Response Body: {http_err.response.text}")
-            raise HTTPException(status_code=500, detail=f"Zoom API Error: {http_err.response.text}")
+            raise HTTPException(status_code=500, detail=f"Zoom API Error: {http_err.response.text if http_err.response else 'Unknown'}")
         except Exception as e:
             print(f"❌ An unexpected error occurred during processing: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     print(f"ℹ️ Received and ignored event: {event}")
     return JSONResponse(content={"message": "Event ignored"}, status_code=200)
+

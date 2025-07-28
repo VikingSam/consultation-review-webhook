@@ -45,6 +45,7 @@ You are a medical consultation analyst. Your task is to create a clean, professi
 
 ## Overview
 - **Provider:** [Insert or infer]
+- **Patient Name:** [Extract from transcript, return First Last. If not found, write "Unknown Patient"]
 - **Consult Duration:** {duration}
 - **Overall Score:** [Rate 1–10 based on completeness of the 15-point framework]
 
@@ -132,8 +133,16 @@ def extract_provider(text):
     match = re.search(r"- \*\*Provider:\*\*\s*(.+)", text)
     if match:
         name = match.group(1).strip()
-        return re.sub(r"[^\w\-]", "_", name)
+        return re.sub(r"[^\w\s-]", "", name).replace(" ", "_")
     return "Unknown_Provider"
+
+# --- NEW FUNCTION to extract patient name ---
+def extract_patient_name(text):
+    match = re.search(r"- \*\*Patient Name:\*\*\s*(.+)", text)
+    if match:
+        name = match.group(1).strip()
+        return re.sub(r"[^\w\s-]", "", name).replace(" ", "_")
+    return "Unknown_Patient"
 
 def upload_to_drive(filename, filedata, mime_type="text/plain"):
     access_token = get_google_access_token()
@@ -228,8 +237,11 @@ async def process_transcript_task(body: dict):
         pdf_bytes = HTML(string=final_html).write_pdf()
         
         provider = extract_provider(summary_markdown)
+        patient = extract_patient_name(summary_markdown) # Get patient name
         timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
-        filename = f"{timestamp} - {provider} - {entity_id}_Summary.pdf"
+        
+        # --- NEW FILENAME FORMAT with patient name ---
+        filename = f"{timestamp} - {provider} - {patient}_Summary.pdf"
 
         upload_to_drive(filename, pdf_bytes, mime_type="application/pdf")
         
@@ -238,7 +250,6 @@ async def process_transcript_task(body: dict):
     except Exception as e:
         print(f"❌ An error occurred during background processing: {e}")
     finally:
-        # Remove the ID from the processing set when done or if an error occurs.
         if entity_id and entity_id in PROCESSING_MEETING_IDS:
             PROCESSING_MEETING_IDS.remove(entity_id)
 
@@ -249,22 +260,4 @@ async def zoom_webhook(request: Request, background_tasks: BackgroundTasks):
 
     if event == "endpoint.url_validation":
         plain_token = body.get("payload", {}).get("plainToken", "")
-        encrypted_token = hmac.new(config["ZOOM_SECRET_TOKEN"].encode(), plain_token.encode(), hashlib.sha256).hexdigest()
-        return JSONResponse(content={"plainToken": plain_token, "encryptedToken": encrypted_token})
-
-    if event == "recording.transcript_completed":
-        meeting_object = body.get("payload", {}).get("object", {})
-        entity_id = meeting_object.get("uuid")
-
-        if entity_id in PROCESSING_MEETING_IDS:
-            print(f"✅ Duplicate webhook for meeting {entity_id} received. Ignoring.")
-            return JSONResponse(content={"status": "already_processing"}, status_code=200)
-        
-        if entity_id:
-            PROCESSING_MEETING_IDS.add(entity_id)
-        
-        background_tasks.add_task(process_transcript_task, body)
-        return JSONResponse(content={"status": "processing_started"}, status_code=202)
-
-    print(f"ℹ️ Received and ignored event: {event}")
-    return JSONResponse(content={"message": "Event ignored"}, status_code=200)
+        encrypted_token = hmac.new(config["ZOOM_SECRET_TOKEN"].encode(), plain_token.encode(), hashlib.sh

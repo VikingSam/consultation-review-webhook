@@ -209,4 +209,88 @@ async def process_transcript_task(body: dict):
         
         encoded_entity_id = entity_id
         if encoded_entity_id.startswith('/') or '//' in encoded_entity_id:
-            encoded_entity_id = requests.utils.quote(reque
+            encoded_entity_id = requests.utils.quote(requests.utils.quote(encoded_entity_id, safe=''))
+
+        print(f"ℹ️ Processing transcript for {entity_type[:-1]} UUID: {entity_id}")
+
+        zoom_access_token = get_zoom_access_token()
+        headers = {"Authorization": f"Bearer {zoom_access_token}"}
+        recording_details_url = f"https://api.zoom.us/v2/{entity_type}/{encoded_entity_id}/recordings"
+        recording_details_response = requests.get(recording_details_url, headers=headers)
+        recording_details_response.raise_for_status()
+        recording_details = recording_details_response.json()
+
+        transcript_file = next((f for f in recording_details.get("recording_files", []) if f.get("file_type") == "TRANSCRIPT"), None)
+        if not transcript_file or "download_url" not in transcript_file:
+            raise ValueError("Transcript file or download URL not found in API response")
+
+        download_url = transcript_file["download_url"]
+        print(f"ℹ️ Found authorized download URL via API: {download_url}")
+
+        transcript_response = requests.get(download_url, headers=headers)
+        transcript_response.raise_for_status()
+        transcript_text = transcript_response.text
+
+        formatted_prompt = CONSULTATION_FRAMEWORK.format(duration=f"{duration} minutes")
+        gpt_response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[{"role": "system", "content": formatted_prompt}, {"role": "user", "content": transcript_text}],
+            temperature=0.5, max_tokens=1500
+        )
+        summary_markdown = gpt_response['choices'][0]['message']['content'].strip()
+        
+        html_content = summary_markdown.replace('\n', '<br>')
+        html_content = re.sub(r'# (.*)', r'<h1>\1</h1>', html_content)
+        html_content = re.sub(r'## (.*)', r'<h2>\1</h2>', html_content)
+        html_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html_content)
+        html_content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html_content)
+        html_content = re.sub(r'---', r'<hr>', html_content)
+        html_content = re.sub(r'❌ Not addressed.', r'<span class="not-addressed">❌ Not addressed.</span>', html_content)
+        final_html = HTML_TEMPLATE.format(report_content=html_content)
+        pdf_bytes = HTML(string=final_html).write_pdf()
+        
+        provider = extract_provider(summary_markdown)
+        patient = extract_patient_name(html_content) # Extract from HTML content
+        timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
+        
+        # Use patient name if found, otherwise fall back to the unique meeting ID
+        identifier = patient if patient != "Unknown_Patient" else entity_id
+        
+        filename = f"{timestamp} - {provider} - {identifier}_Summary.pdf"
+
+        upload_to_drive(filename, pdf_bytes, mime_type="application/pdf")
+        
+        print(f"✅ Successfully processed transcript for meeting {meeting_object.get('topic')}")
+
+    except Exception as e:
+        print(f"❌ An error occurred during background processing: {e}")
+    finally:
+        if entity_id and entity_id in PROCESSING_MEETING_IDS:
+            PROCESSING_MEETING_IDS.remove(entity_id)
+
+@app.post("/webhook")
+async def zoom_webhook(request: Request, background_tasks: BackgroundTasks):
+    body = await request.json()
+    event = body.get("event")
+
+    if event == "endpoint.url_validation":
+        plain_token = body.get("payload", {}).get("plainToken", "")
+        encrypted_token = hmac.new(config["ZOOM_SECRET_TOKEN"].encode(), plain_token.encode(), hashlib.sha256).hexdigest()
+        return JSONResponse(content={"plainToken": plain_token, "encryptedToken": encrypted_token})
+
+    if event == "recording.transcript_completed":
+        meeting_object = body.get("payload", {}).get("object", {})
+        entity_id = meeting_object.get("uuid")
+
+        if entity_id in PROCESSING_MEETING_IDS:
+            print(f"✅ Duplicate webhook for meeting {entity_id} received. Ignoring.")
+            return JSONResponse(content={"status": "already_processing"}, status_code=200)
+        
+        if entity_id:
+            PROCESSING_MEETING_IDS.add(entity_id)
+        
+        background_tasks.add_task(process_transcript_task, body)
+        return JSONResponse(content={"status": "processing_started"}, status_code=202)
+
+    print(f"ℹ️ Received and ignored event: {event}")
+    return JSONResponse(content={"message": "Event ignored"}, status_code=200)

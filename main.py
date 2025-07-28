@@ -37,31 +37,42 @@ openai.api_key = config["OPENAI_API_KEY"]
 
 # The prompt for analyzing the consultation
 CONSULTATION_FRAMEWORK = """
-You are a medical consultation analyst. Read the transcript and extract relevant information for each section of the 15-point framework. Respond with:
+You are a medical consultation analyst. Your task is to create a clean, professional, and easy-to-read consultation report from a transcript. Use Markdown for formatting.
 
-Provider: [Insert or infer]
-Score: [Rate 1–10 based on completeness]
-Consult Duration: {duration}
+# Consultation Summary Report
 
-Summary by Section:
-1. **Introduction of Provider**
-2. **Confirmation of Patient by Name and DOB**
-3. **Confirmation of Patient Location**
-4. **Confirmation of Current Regimen**
-5. **Symptoms, Goals for Treatment**
-6. **Health Updates, Medication Reconciliation, Preventative Screening**
-7. **Blood Donation Regimen**
-8. **Lab Review**
-9. **HRT/Peptide/Other Recommendations**
-10. **Blood Donation Plans**
-11. **Lab Follow-up Plan**
-12. **Refill Needs**
-13. **CC Confirmation**
-14. **Shipping Address Confirmation**
-15. **Review Plan & Patient Q&A**
+---
 
-If a section is not discussed, write: “❌ Not addressed.”
-Make the output readable like a professional consultation report.
+## Overview
+- **Provider:** [Insert or infer]
+- **Consult Duration:** {duration}
+- **Overall Score:** [Rate 1–10 based on completeness of the 15-point framework]
+
+## Key Takeaways
+*Provide a brief, 2-3 sentence summary of the main points of the consultation, including key recommendations and outcomes.*
+
+---
+
+## Detailed Framework Analysis
+
+1.  **Introduction of Provider:**
+2.  **Confirmation of Patient by Name and DOB:**
+3.  **Confirmation of Patient Location:**
+4.  **Confirmation of Current Regimen:**
+5.  **Symptoms, Goals for Treatment:**
+6.  **Health Updates, Medication Reconciliation, Preventative Screening:**
+7.  **Blood Donation Regimen:**
+8.  **Lab Review:**
+9.  **HRT/Peptide/Other Recommendations:**
+10. **Blood Donation Plans:**
+11. **Lab Follow-up Plan:**
+12. **Refill Needs:**
+13. **CC Confirmation:**
+14. **Shipping Address Confirmation:**
+15. **Review Plan & Patient Q&A:**
+
+---
+*For each of the 15 points above, extract the relevant information. If a section is not discussed, write: “❌ Not addressed.”*
 """
 
 app = FastAPI()
@@ -99,7 +110,7 @@ def get_zoom_access_token():
 
 def extract_provider(text):
     """Extracts the provider's name from the summary text for the filename."""
-    match = re.search(r"Provider:\s*(.+)", text)
+    match = re.search(r"- \*\*Provider:\*\*\s*(.+)", text)
     if match:
         name = match.group(1).strip()
         return re.sub(r"[^\w\-]", "_", name)

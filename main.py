@@ -151,13 +151,13 @@ async def zoom_webhook(request: Request):
             payload = body.get("payload", {})
             meeting_object = payload.get("object", {})
             
-            # --- THE FINAL FIX: Handle both Meetings and Webinars ---
-            meeting_type = meeting_object.get("type", 1) # Default to meeting if type is not present
-            
-            if meeting_type in [1, 2, 3]: # It's a meeting
+            # --- THE FINAL FIX: Correctly handle all Meeting and Webinar types ---
+            meeting_type = meeting_object.get("type")
+
+            if meeting_type in [1, 2, 3, 8]: # It's a meeting (Instant, Scheduled, or Recurring)
                 entity_type = "meetings"
                 entity_id = meeting_object.get("uuid")
-            elif meeting_type == 8: # It's a webinar
+            elif meeting_type in [5, 6, 9]: # It's a webinar
                 entity_type = "webinars"
                 entity_id = meeting_object.get("uuid")
             else:
@@ -166,6 +166,10 @@ async def zoom_webhook(request: Request):
 
             if not entity_id:
                 raise ValueError(f"Entity ID (UUID) not found in webhook payload for type {entity_type}")
+            
+            # Per Zoom API docs, UUIDs with slashes must be double URL encoded.
+            if entity_id.startswith('/') or '//' in entity_id:
+                entity_id = requests.utils.quote(requests.utils.quote(entity_id, safe=''))
 
             print(f"ℹ️ Processing transcript for {entity_type[:-1]} UUID: {entity_id}")
 

@@ -99,6 +99,7 @@ REPORT_TEMPLATE_MD = """
 16. **Anomalous Content:** {anomalous_content}
 """
 
+# --- CORRECTED HTML SHELL with generic fonts ---
 HTML_SHELL = """
 <!DOCTYPE html>
 <html lang="en">
@@ -277,9 +278,4 @@ async def zoom_webhook(request: Request, background_tasks: BackgroundTasks):
             print(f"✅ Duplicate webhook for {entity_id} ignored.")
             return JSONResponse(content={"status": "already_processing"}, status_code=200)
         
-        if entity_id: PROCESSING_MEETING_IDS.add(entity_id)
-        
-        background_tasks.add_task(process_transcript_task, body)
-        return JSONResponse(content={"status": "processing_started"}, status_code=202)
-
-    return JSONResponse(content={"message": "Event ignored"}, status_code=200)
+        if entity_id: PROCESSING_MEETING_IDS.add(entity_

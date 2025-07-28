@@ -150,20 +150,33 @@ async def zoom_webhook(request: Request):
         try:
             payload = body.get("payload", {})
             meeting_object = payload.get("object", {})
-            meeting_uuid = meeting_object.get("uuid")
             
-            if not meeting_uuid:
-                raise ValueError("Meeting UUID not found in webhook payload")
+            # --- THE FINAL FIX: Handle both Meetings and Webinars ---
+            meeting_type = meeting_object.get("type", 1) # Default to meeting if type is not present
+            
+            if meeting_type in [1, 2, 3]: # It's a meeting
+                entity_type = "meetings"
+                entity_id = meeting_object.get("uuid")
+            elif meeting_type == 8: # It's a webinar
+                entity_type = "webinars"
+                entity_id = meeting_object.get("uuid")
+            else:
+                print(f"ℹ️ Ignoring unknown meeting type: {meeting_type}")
+                return JSONResponse(content={"message": "Event for unknown type ignored"}, status_code=200)
 
-            print(f"ℹ️ Processing transcript for meeting UUID: {meeting_uuid}")
+            if not entity_id:
+                raise ValueError(f"Entity ID (UUID) not found in webhook payload for type {entity_type}")
+
+            print(f"ℹ️ Processing transcript for {entity_type[:-1]} UUID: {entity_id}")
 
             zoom_access_token = get_zoom_access_token()
             headers = {"Authorization": f"Bearer {zoom_access_token}"}
             
-            # --- NEW, MORE ROBUST METHOD ---
-            # Use the Zoom API to get recording details, which provides an authorized download URL
-            recording_details_url = f"https://api.zoom.us/v2/meetings/{meeting_uuid}/recordings"
+            recording_details_url = f"https://api.zoom.us/v2/{entity_type}/{entity_id}/recordings"
+            
             recording_details_response = requests.get(recording_details_url, headers=headers)
+            if recording_details_response.status_code != 200:
+                print(f"❌ Zoom API Error Response Body: {recording_details_response.text}")
             recording_details_response.raise_for_status()
             recording_details = recording_details_response.json()
 
@@ -179,12 +192,10 @@ async def zoom_webhook(request: Request):
             download_url = transcript_file["download_url"]
             print(f"ℹ️ Found authorized download URL via API: {download_url}")
 
-            # Download the transcript using the same authorized token
             transcript_response = requests.get(download_url, headers=headers)
             transcript_response.raise_for_status()
             transcript_text = transcript_response.text
 
-            # Analyze the transcript with OpenAI
             gpt_response = openai.ChatCompletion.create(
                 model="gpt-4o",
                 messages=[
@@ -196,7 +207,6 @@ async def zoom_webhook(request: Request):
             )
             summary = gpt_response['choices'][0]['message']['content'].strip()
             
-            # Create filename and upload the summary
             provider = extract_provider(summary)
             timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
             filename = f"{timestamp} - {provider}_Consultation_Summary.txt"
@@ -206,11 +216,14 @@ async def zoom_webhook(request: Request):
             print(f"✅ Successfully processed transcript for meeting {meeting_object.get('topic')}")
             return JSONResponse(content={"status": "processed"}, status_code=200)
 
+        except requests.exceptions.HTTPError as http_err:
+            print(f"❌ HTTP error occurred: {http_err}")
+            if http_err.response:
+                print(f"❌ Zoom API Response Body: {http_err.response.text}")
+            raise HTTPException(status_code=500, detail=f"Zoom API Error: {http_err.response.text}")
         except Exception as e:
-            print(f"❌ An error occurred during processing: {e}")
-            # Use HTTPException to return a proper error response to Zoom
+            print(f"❌ An unexpected error occurred during processing: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     print(f"ℹ️ Received and ignored event: {event}")
     return JSONResponse(content={"message": "Event ignored"}, status_code=200)
-

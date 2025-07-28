@@ -41,7 +41,7 @@ You are a medical consultation analyst. Read the transcript and extract relevant
 
 Provider: [Insert or infer]
 Score: [Rate 1–10 based on completeness]
-Consult Duration: [Insert duration in minutes if known or estimate based on transcript]
+Consult Duration: {duration}
 
 Summary by Section:
 1. **Introduction of Provider**
@@ -153,6 +153,7 @@ async def zoom_webhook(request: Request):
             # --- THE FINAL FIX: Correctly handle all Meeting and Webinar types ---
             meeting_type = meeting_object.get("type")
             entity_id = meeting_object.get("uuid")
+            duration = meeting_object.get("duration", "Not available")
 
             if meeting_type in [1, 2, 3, 4, 8]: # It's a meeting (Instant, Scheduled, Recurring, PMI)
                 entity_type = "meetings"
@@ -198,11 +199,14 @@ async def zoom_webhook(request: Request):
             transcript_response.raise_for_status()
             transcript_text = transcript_response.text
 
+            # Format the prompt with the actual duration
+            formatted_prompt = CONSULTATION_FRAMEWORK.format(duration=f"{duration} minutes")
+
             # Analyze the transcript with OpenAI
             gpt_response = openai.ChatCompletion.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": CONSULTATION_FRAMEWORK},
+                    {"role": "system", "content": formatted_prompt},
                     {"role": "user", "content": transcript_text}
                 ],
                 temperature=0.5,
@@ -230,4 +234,3 @@ async def zoom_webhook(request: Request):
 
     print(f"ℹ️ Received and ignored event: {event}")
     return JSONResponse(content={"message": "Event ignored"}, status_code=200)
-

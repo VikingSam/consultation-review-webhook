@@ -9,10 +9,9 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from datetime import datetime
 import re
-from weasyprint import HTML # --- NEW: Import library for PDF generation ---
+from weasyprint import HTML
 
 # === LOAD CONFIGURATION FROM ENVIRONMENT VARIABLES ===
-# A function to ensure all required environment variables are set on startup.
 def load_env_vars():
     required_vars = [
         "GOOGLE_DRIVE_FOLDER_ID", "OPENAI_API_KEY", "ZOOM_SECRET_TOKEN",
@@ -31,7 +30,7 @@ try:
     config = load_env_vars()
 except ValueError as e:
     print(e)
-    exit(1) # Exit if configuration is missing
+    exit(1)
 
 # Set the OpenAI API key
 openai.api_key = config["OPENAI_API_KEY"]
@@ -76,7 +75,6 @@ You are a medical consultation analyst. Your task is to create a clean, professi
 *For each of the 15 points above, extract the relevant information. If a section is not discussed, write: “❌ Not addressed.”*
 """
 
-# --- NEW: HTML Template for Professional Reports ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -85,66 +83,190 @@ HTML_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Consultation Summary</title>
     <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            background-color: #f8f9fa;
-            margin: 0;
-            padding: 20px;
-        }}
-        .container {{
-            max-width: 800px;
-            margin: 20px auto;
-            background-color: #ffffff;
-            border: 1px solid #dee2e6;
-            border-radius: 8px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            padding: 40px;
-        }}
-        h1, h2 {{
-            color: #2c3e50;
-            border-bottom: 2px solid #3498db;
-            padding-bottom: 10px;
-        }}
-        h1 {{
-            text-align: center;
-            margin-bottom: 30px;
-        }}
-        hr {{
-            border: none;
-            border-top: 1px solid #dee2e6;
-            margin: 30px 0;
-        }}
-        .overview {{
-            background-color: #ecf0f1;
-            padding: 20px;
-            border-radius: 5px;
-            margin-bottom: 30px;
-        }}
-        .overview ul {{
-            list-style: none;
-            padding: 0;
-        }}
-        .overview li {{
-            font-size: 1.1em;
-            margin-bottom: 10px;
-        }}
-        strong {{
-            color: #34495e;
-        }}
-        .framework-item {{
-            margin-bottom: 15px;
-        }}
-        .not-addressed {{
-            color: #e74c3c;
-            font-style: italic;
-        }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; background-color: #f8f9fa; margin: 0; padding: 20px; }}
+        .container {{ max-width: 800px; margin: 20px auto; background-color: #ffffff; border: 1px solid #dee2e6; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); padding: 40px; }}
+        h1, h2 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
+        h1 {{ text-align: center; margin-bottom: 30px; }}
+        hr {{ border: none; border-top: 1px solid #dee2e6; margin: 30px 0; }}
+        strong {{ color: #34495e; }}
+        .not-addressed {{ color: #e74c3c; font-style: italic; }}
     </style>
 </head>
-<body>
-    <div class="container">
-        {report_content}
-    </div>
-</body>
+<body><div class="container">{report_content}</div></body>
 </html>
+"""
+
+app = FastAPI()
+
+# --- NEW: In-memory set to track currently processing meetings ---
+# This provides an immediate check to prevent race conditions from duplicate webhooks.
+PROCESSING_MEETING_IDS = set()
+
+def get_google_access_token():
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "client_id": config["GOOGLE_CLIENT_ID"],
+        "client_secret": config["GOOGLE_CLIENT_SECRET"],
+        "refresh_token": config["GOOGLE_REFRESH_TOKEN"],
+        "grant_type": "refresh_token"
+    }
+    response = requests.post(token_url, data=data)
+    if response.status_code == 200:
+        return response.json()["access_token"]
+    else:
+        print(f"❌ Failed to refresh Google token: {response.text}")
+        raise HTTPException(status_code=500, detail="Failed to refresh Google token")
+
+def get_zoom_access_token():
+    token_url = "https://zoom.us/oauth/token"
+    params = {"grant_type": "account_credentials", "account_id": config["ZOOM_ACCOUNT_ID"]}
+    auth = (config["ZOOM_CLIENT_ID"], config["ZOOM_CLIENT_SECRET"])
+    response = requests.post(token_url, auth=auth, params=params)
+    if response.status_code == 200:
+        print("✅ Successfully obtained Zoom access token.")
+        return response.json()["access_token"]
+    else:
+        print(f"❌ Failed to get Zoom access token: {response.status_code} - {response.text}")
+        raise HTTPException(status_code=500, detail="Failed to get Zoom access token")
+
+def extract_provider(text):
+    match = re.search(r"- \*\*Provider:\*\*\s*(.+)", text)
+    if match:
+        name = match.group(1).strip()
+        return re.sub(r"[^\w\-]", "_", name)
+    return "Unknown_Provider"
+
+def upload_to_drive(filename, filedata, mime_type="text/plain"):
+    access_token = get_google_access_token()
+    headers = {"Authorization": f"Bearer {access_token}"}
+    metadata = {"name": filename, "parents": [config["GOOGLE_DRIVE_FOLDER_ID"]]}
+    files = {"data": ("metadata", json.dumps(metadata), "application/json"), "file": (filename, filedata, mime_type)}
+    response = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", headers=headers, files=files)
+    print("📤 Google Drive upload response:", response.status_code, response.text)
+    response.raise_for_status()
+
+def is_already_processed(meeting_uuid):
+    """Secondary check: Verifies in Google Drive if a report already exists."""
+    try:
+        access_token = get_google_access_token()
+        headers = {"Authorization": f"Bearer {access_token}"}
+        query = f"name contains '{meeting_uuid}' and '{config['GOOGLE_DRIVE_FOLDER_ID']}' in parents and trashed=false"
+        params = {'q': query, 'fields': 'files(id)'}
+        response = requests.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
+        response.raise_for_status()
+        if response.json().get("files"):
+            print(f"✅ Report for meeting {meeting_uuid} already exists in Drive. Skipping.")
+            return True
+        return False
+    except Exception as e:
+        print(f"⚠️ Could not check for existing file, proceeding anyway. Error: {e}")
+        return False
+
+async def process_transcript_task(body: dict):
+    entity_id = None
+    try:
+        payload = body.get("payload", {})
+        meeting_object = payload.get("object", {})
+        entity_id = meeting_object.get("uuid")
+
+        if is_already_processed(entity_id):
+            return
+
+        meeting_type = meeting_object.get("type")
+        duration = meeting_object.get("duration", "Not available")
+
+        if meeting_type in [1, 2, 3, 4, 8]:
+            entity_type = "meetings"
+        elif meeting_type in [5, 6, 9]:
+            entity_type = "webinars"
+        else:
+            print(f"ℹ️ Ignoring unknown meeting type: {meeting_type}")
+            return
+
+        if not entity_id:
+            raise ValueError("Entity ID (UUID) not found in webhook payload")
+        
+        encoded_entity_id = entity_id
+        if encoded_entity_id.startswith('/') or '//' in encoded_entity_id:
+            encoded_entity_id = requests.utils.quote(requests.utils.quote(encoded_entity_id, safe=''))
+
+        print(f"ℹ️ Processing transcript for {entity_type[:-1]} UUID: {entity_id}")
+
+        zoom_access_token = get_zoom_access_token()
+        headers = {"Authorization": f"Bearer {zoom_access_token}"}
+        recording_details_url = f"https://api.zoom.us/v2/{entity_type}/{encoded_entity_id}/recordings"
+        recording_details_response = requests.get(recording_details_url, headers=headers)
+        recording_details_response.raise_for_status()
+        recording_details = recording_details_response.json()
+
+        transcript_file = next((f for f in recording_details.get("recording_files", []) if f.get("file_type") == "TRANSCRIPT"), None)
+        if not transcript_file or "download_url" not in transcript_file:
+            raise ValueError("Transcript file or download URL not found in API response")
+
+        download_url = transcript_file["download_url"]
+        print(f"ℹ️ Found authorized download URL via API: {download_url}")
+
+        transcript_response = requests.get(download_url, headers=headers)
+        transcript_response.raise_for_status()
+        transcript_text = transcript_response.text
+
+        formatted_prompt = CONSULTATION_FRAMEWORK.format(duration=f"{duration} minutes")
+        gpt_response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[{"role": "system", "content": formatted_prompt}, {"role": "user", "content": transcript_text}],
+            temperature=0.5, max_tokens=1500
+        )
+        summary_markdown = gpt_response['choices'][0]['message']['content'].strip()
+        
+        html_content = summary_markdown.replace('\n', '<br>')
+        html_content = re.sub(r'# (.*)', r'<h1>\1</h1>', html_content)
+        html_content = re.sub(r'## (.*)', r'<h2>\1</h2>', html_content)
+        html_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html_content)
+        html_content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html_content)
+        html_content = re.sub(r'---', r'<hr>', html_content)
+        html_content = re.sub(r'❌ Not addressed.', r'<span class="not-addressed">❌ Not addressed.</span>', html_content)
+        final_html = HTML_TEMPLATE.format(report_content=html_content)
+        pdf_bytes = HTML(string=final_html).write_pdf()
+        
+        provider = extract_provider(summary_markdown)
+        timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
+        filename = f"{timestamp} - {provider} - {entity_id}_Summary.pdf"
+
+        upload_to_drive(filename, pdf_bytes, mime_type="application/pdf")
+        
+        print(f"✅ Successfully processed transcript for meeting {meeting_object.get('topic')}")
+
+    except Exception as e:
+        print(f"❌ An error occurred during background processing: {e}")
+    finally:
+        # --- NEW: Remove the ID from the processing set when done ---
+        if entity_id and entity_id in PROCESSING_MEETING_IDS:
+            PROCESSING_MEETING_IDS.remove(entity_id)
+
+@app.post("/webhook")
+async def zoom_webhook(request: Request, background_tasks: BackgroundTasks):
+    body = await request.json()
+    event = body.get("event")
+
+    if event == "endpoint.url_validation":
+        plain_token = body.get("payload", {}).get("plainToken", "")
+        encrypted_token = hmac.new(config["ZOOM_SECRET_TOKEN"].encode(), plain_token.encode(), hashlib.sha256).hexdigest()
+        return JSONResponse(content={"plainToken": plain_token, "encryptedToken": encrypted_token})
+
+    if event == "recording.transcript_completed":
+        meeting_object = body.get("payload", {}).get("object", {})
+        entity_id = meeting_object.get("uuid")
+
+        # --- PRIMARY FIX: Check in-memory set before starting ---
+        if entity_id in PROCESSING_MEETING_IDS:
+            print(f"✅ Duplicate webhook for meeting {entity_id} received. Ignoring.")
+            return JSONResponse(content={"status": "already_processing"}, status_code=200)
+        
+        if entity_id:
+            PROCESSING_MEETING_IDS.add(entity_id)
+        
+        background_tasks.add_task(process_transcript_task, body)
+        return JSONResponse(content={"status": "processing_started"}, status_code=202)
+
+    print(f"ℹ️ Received and ignored event: {event}")
+    return JSONResponse(content={"message": "Event ignored"}, status_code=200)

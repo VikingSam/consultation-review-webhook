@@ -75,6 +75,75 @@ You are a medical consultation analyst. Your task is to create a clean, professi
 *For each of the 15 points above, extract the relevant information. If a section is not discussed, write: “❌ Not addressed.”*
 """
 
+# --- NEW: HTML Template for Professional Reports ---
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Consultation Summary</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f8f9fa;
+            margin: 0;
+            padding: 20px;
+        }}
+        .container {{
+            max-width: 800px;
+            margin: 20px auto;
+            background-color: #ffffff;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            padding: 40px;
+        }}
+        h1, h2 {{
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }}
+        h1 {{
+            text-align: center;
+            margin-bottom: 30px;
+        }}
+        .overview {{
+            background-color: #ecf0f1;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 30px;
+        }}
+        .overview ul {{
+            list-style: none;
+            padding: 0;
+        }}
+        .overview li {{
+            font-size: 1.1em;
+            margin-bottom: 10px;
+        }}
+        strong {{
+            color: #34495e;
+        }}
+        .framework-item {{
+            margin-bottom: 15px;
+        }}
+        .not-addressed {{
+            color: #e74c3c;
+            font-style: italic;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        {report_content}
+    </div>
+</body>
+</html>
+"""
+
 app = FastAPI()
 
 def get_google_access_token():
@@ -116,7 +185,7 @@ def extract_provider(text):
         return re.sub(r"[^\w\-]", "_", name)
     return "Unknown_Provider"
 
-def upload_to_drive(filename, filedata):
+def upload_to_drive(filename, filedata, mime_type="text/plain"):
     """Uploads the given file data to the specified Google Drive folder."""
     try:
         access_token = get_google_access_token()
@@ -127,7 +196,7 @@ def upload_to_drive(filename, filedata):
         }
         files = {
             "data": ("metadata", json.dumps(metadata), "application/json"),
-            "file": (filename, filedata, "text/plain")
+            "file": (filename, filedata, mime_type)
         }
         response = requests.post(
             "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
@@ -217,17 +286,25 @@ async def zoom_webhook(request: Request):
                 temperature=0.5,
                 max_tokens=1500
             )
-            summary = gpt_response['choices'][0]['message']['content'].strip()
+            summary_markdown = gpt_response['choices'][0]['message']['content'].strip()
             
-            provider = extract_provider(summary)
+            # Convert the AI's Markdown response to basic HTML for the report
+            html_content = summary_markdown.replace('\n', '<br>')
+            html_content = re.sub(r'# (.*)', r'<h1>\1</h1>', html_content)
+            html_content = re.sub(r'## (.*)', r'<h2>\1</h2>', html_content)
+            html_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html_content)
+            html_content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html_content)
+            html_content = re.sub(r'❌ Not addressed.', r'<span class="not-addressed">❌ Not addressed.</span>', html_content)
+            
+            final_html = HTML_TEMPLATE.format(report_content=html_content)
+            
+            provider = extract_provider(summary_markdown)
             timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
-            filename = f"{timestamp} - {provider}_Consultation_Summary.txt"
+            filename = f"{timestamp} - {provider}_Consultation_Summary.html" # Changed to .html
 
-            upload_to_drive(filename, summary.encode("utf-8"))
+            upload_to_drive(filename, final_html.encode("utf-8"), mime_type="text/html")
             
             print(f"✅ Successfully processed transcript for meeting {meeting_object.get('topic')}")
-            # --- FIX: Stop processing after the first transcript ---
-            # This prevents creating duplicate files if Zoom sends multiple transcript files.
             return JSONResponse(content={"status": "processed"}, status_code=200)
 
         except requests.exceptions.HTTPError as http_err:

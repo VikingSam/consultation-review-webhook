@@ -130,18 +130,31 @@ def get_zoom_access_token():
         raise HTTPException(status_code=500, detail="Failed to get Zoom access token")
 
 def extract_provider(text):
+    """Extracts a cleaner provider name."""
     match = re.search(r"- \*\*Provider:\*\*\s*(.+)", text)
     if match:
-        name = match.group(1).strip()
+        # Take only the part before the first comma to remove titles
+        name = match.group(1).strip().split(',')[0]
+        # Sanitize for filename
         return re.sub(r"[^\w\s-]", "", name).replace(" ", "_")
     return "Unknown_Provider"
 
-# --- NEW FUNCTION to extract patient name ---
 def extract_patient_name(text):
+    """Extracts the patient name more robustly from multiple locations."""
+    # First, try to find it in the overview section
     match = re.search(r"- \*\*Patient Name:\*\*\s*(.+)", text)
     if match:
         name = match.group(1).strip()
+        if "unknown patient" not in name.lower():
+            return re.sub(r"[^\w\s-]", "", name).replace(" ", "_")
+
+    # If not in overview, try to find it in the detailed analysis section (case-insensitive)
+    # This looks for "2. **Confirmation...**<br> Patient Name..."
+    match = re.search(r"2\.\s*\*\*Confirmation of Patient by Name and DOB:\*\*\s*<br>\s*([^<,]+)", text, re.IGNORECASE)
+    if match:
+        name = match.group(1).strip()
         return re.sub(r"[^\w\s-]", "", name).replace(" ", "_")
+
     return "Unknown_Patient"
 
 def upload_to_drive(filename, filedata, mime_type="text/plain"):
@@ -196,68 +209,4 @@ async def process_transcript_task(body: dict):
         
         encoded_entity_id = entity_id
         if encoded_entity_id.startswith('/') or '//' in encoded_entity_id:
-            encoded_entity_id = requests.utils.quote(requests.utils.quote(encoded_entity_id, safe=''))
-
-        print(f"ℹ️ Processing transcript for {entity_type[:-1]} UUID: {entity_id}")
-
-        zoom_access_token = get_zoom_access_token()
-        headers = {"Authorization": f"Bearer {zoom_access_token}"}
-        recording_details_url = f"https://api.zoom.us/v2/{entity_type}/{encoded_entity_id}/recordings"
-        recording_details_response = requests.get(recording_details_url, headers=headers)
-        recording_details_response.raise_for_status()
-        recording_details = recording_details_response.json()
-
-        transcript_file = next((f for f in recording_details.get("recording_files", []) if f.get("file_type") == "TRANSCRIPT"), None)
-        if not transcript_file or "download_url" not in transcript_file:
-            raise ValueError("Transcript file or download URL not found in API response")
-
-        download_url = transcript_file["download_url"]
-        print(f"ℹ️ Found authorized download URL via API: {download_url}")
-
-        transcript_response = requests.get(download_url, headers=headers)
-        transcript_response.raise_for_status()
-        transcript_text = transcript_response.text
-
-        formatted_prompt = CONSULTATION_FRAMEWORK.format(duration=f"{duration} minutes")
-        gpt_response = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=[{"role": "system", "content": formatted_prompt}, {"role": "user", "content": transcript_text}],
-            temperature=0.5, max_tokens=1500
-        )
-        summary_markdown = gpt_response['choices'][0]['message']['content'].strip()
-        
-        html_content = summary_markdown.replace('\n', '<br>')
-        html_content = re.sub(r'# (.*)', r'<h1>\1</h1>', html_content)
-        html_content = re.sub(r'## (.*)', r'<h2>\1</h2>', html_content)
-        html_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html_content)
-        html_content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html_content)
-        html_content = re.sub(r'---', r'<hr>', html_content)
-        html_content = re.sub(r'❌ Not addressed.', r'<span class="not-addressed">❌ Not addressed.</span>', html_content)
-        final_html = HTML_TEMPLATE.format(report_content=html_content)
-        pdf_bytes = HTML(string=final_html).write_pdf()
-        
-        provider = extract_provider(summary_markdown)
-        patient = extract_patient_name(summary_markdown) # Get patient name
-        timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
-        
-        # --- NEW FILENAME FORMAT with patient name ---
-        filename = f"{timestamp} - {provider} - {patient}_Summary.pdf"
-
-        upload_to_drive(filename, pdf_bytes, mime_type="application/pdf")
-        
-        print(f"✅ Successfully processed transcript for meeting {meeting_object.get('topic')}")
-
-    except Exception as e:
-        print(f"❌ An error occurred during background processing: {e}")
-    finally:
-        if entity_id and entity_id in PROCESSING_MEETING_IDS:
-            PROCESSING_MEETING_IDS.remove(entity_id)
-
-@app.post("/webhook")
-async def zoom_webhook(request: Request, background_tasks: BackgroundTasks):
-    body = await request.json()
-    event = body.get("event")
-
-    if event == "endpoint.url_validation":
-        plain_token = body.get("payload", {}).get("plainToken", "")
-        encrypted_token = hmac.new(config["ZOOM_SECRET_TOKEN"].encode(), plain_token.encode(), hashlib.sh
+            encoded_entity_id = requests.utils.quote(reque

@@ -5,7 +5,7 @@ import hashlib
 import requests
 import openai
 import json
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from datetime import datetime
 import re
@@ -209,9 +209,93 @@ def upload_to_drive(filename, filedata, mime_type="text/plain"):
         print(f"❌ Error uploading to Google Drive: {e}")
         raise e
 
+async def process_transcript_task(body: dict):
+    """This function runs in the background to process the transcript without blocking."""
+    try:
+        payload = body.get("payload", {})
+        meeting_object = payload.get("object", {})
+        
+        meeting_type = meeting_object.get("type")
+        entity_id = meeting_object.get("uuid")
+        duration = meeting_object.get("duration", "Not available")
+
+        if meeting_type in [1, 2, 3, 4, 8]: # It's a meeting (Instant, Scheduled, Recurring, PMI)
+            entity_type = "meetings"
+        elif meeting_type in [5, 6, 9]: # It's a webinar
+            entity_type = "webinars"
+        else:
+            print(f"ℹ️ Ignoring unknown meeting type: {meeting_type}")
+            return
+
+        if not entity_id:
+            raise ValueError(f"Entity ID (UUID) not found in webhook payload for type {entity_type}")
+        
+        if entity_id.startswith('/') or '//' in entity_id:
+            entity_id = requests.utils.quote(requests.utils.quote(entity_id, safe=''))
+
+        print(f"ℹ️ Processing transcript for {entity_type[:-1]} UUID: {entity_id}")
+
+        zoom_access_token = get_zoom_access_token()
+        headers = {"Authorization": f"Bearer {zoom_access_token}"}
+        
+        recording_details_url = f"https://api.zoom.us/v2/{entity_type}/{entity_id}/recordings"
+        
+        recording_details_response = requests.get(recording_details_url, headers=headers)
+        recording_details_response.raise_for_status()
+        recording_details = recording_details_response.json()
+
+        transcript_file = None
+        for file in recording_details.get("recording_files", []):
+            if file.get("file_type") == "TRANSCRIPT":
+                transcript_file = file
+                break
+        
+        if not transcript_file or "download_url" not in transcript_file:
+            raise ValueError("Transcript file or download URL not found in API response")
+
+        download_url = transcript_file["download_url"]
+        print(f"ℹ️ Found authorized download URL via API: {download_url}")
+
+        transcript_response = requests.get(download_url, headers=headers)
+        transcript_response.raise_for_status()
+        transcript_text = transcript_response.text
+
+        formatted_prompt = CONSULTATION_FRAMEWORK.format(duration=f"{duration} minutes")
+
+        gpt_response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": formatted_prompt},
+                {"role": "user", "content": transcript_text}
+            ],
+            temperature=0.5,
+            max_tokens=1500
+        )
+        summary_markdown = gpt_response['choices'][0]['message']['content'].strip()
+        
+        html_content = summary_markdown.replace('\n', '<br>')
+        html_content = re.sub(r'# (.*)', r'<h1>\1</h1>', html_content)
+        html_content = re.sub(r'## (.*)', r'<h2>\1</h2>', html_content)
+        html_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html_content)
+        html_content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html_content)
+        html_content = re.sub(r'❌ Not addressed.', r'<span class="not-addressed">❌ Not addressed.</span>', html_content)
+        
+        final_html = HTML_TEMPLATE.format(report_content=html_content)
+        
+        provider = extract_provider(summary_markdown)
+        timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
+        filename = f"{timestamp} - {provider}_Consultation_Summary.html"
+
+        upload_to_drive(filename, final_html.encode("utf-8"), mime_type="text/html")
+        
+        print(f"✅ Successfully processed transcript for meeting {meeting_object.get('topic')}")
+
+    except Exception as e:
+        print(f"❌ An error occurred during background processing: {e}")
+
 
 @app.post("/webhook")
-async def zoom_webhook(request: Request):
+async def zoom_webhook(request: Request, background_tasks: BackgroundTasks):
     """Main webhook endpoint to receive notifications from Zoom."""
     body = await request.json()
     event = body.get("event")
@@ -226,95 +310,10 @@ async def zoom_webhook(request: Request):
         return JSONResponse(content={"plainToken": plain_token, "encryptedToken": encrypted_token})
 
     if event == "recording.transcript_completed":
-        try:
-            payload = body.get("payload", {})
-            meeting_object = payload.get("object", {})
-            
-            meeting_type = meeting_object.get("type")
-            entity_id = meeting_object.get("uuid")
-            duration = meeting_object.get("duration", "Not available")
-
-            if meeting_type in [1, 2, 3, 4, 8]: # It's a meeting (Instant, Scheduled, Recurring, PMI)
-                entity_type = "meetings"
-            elif meeting_type in [5, 6, 9]: # It's a webinar
-                entity_type = "webinars"
-            else:
-                print(f"ℹ️ Ignoring unknown meeting type: {meeting_type}")
-                return JSONResponse(content={"message": "Event for unknown type ignored"}, status_code=200)
-
-            if not entity_id:
-                raise ValueError(f"Entity ID (UUID) not found in webhook payload for type {entity_type}")
-            
-            if entity_id.startswith('/') or '//' in entity_id:
-                entity_id = requests.utils.quote(requests.utils.quote(entity_id, safe=''))
-
-            print(f"ℹ️ Processing transcript for {entity_type[:-1]} UUID: {entity_id}")
-
-            zoom_access_token = get_zoom_access_token()
-            headers = {"Authorization": f"Bearer {zoom_access_token}"}
-            
-            recording_details_url = f"https://api.zoom.us/v2/{entity_type}/{entity_id}/recordings"
-            
-            recording_details_response = requests.get(recording_details_url, headers=headers)
-            recording_details_response.raise_for_status()
-            recording_details = recording_details_response.json()
-
-            transcript_file = None
-            for file in recording_details.get("recording_files", []):
-                if file.get("file_type") == "TRANSCRIPT":
-                    transcript_file = file
-                    break
-            
-            if not transcript_file or "download_url" not in transcript_file:
-                raise ValueError("Transcript file or download URL not found in API response")
-
-            download_url = transcript_file["download_url"]
-            print(f"ℹ️ Found authorized download URL via API: {download_url}")
-
-            transcript_response = requests.get(download_url, headers=headers)
-            transcript_response.raise_for_status()
-            transcript_text = transcript_response.text
-
-            formatted_prompt = CONSULTATION_FRAMEWORK.format(duration=f"{duration} minutes")
-
-            gpt_response = openai.ChatCompletion.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": formatted_prompt},
-                    {"role": "user", "content": transcript_text}
-                ],
-                temperature=0.5,
-                max_tokens=1500
-            )
-            summary_markdown = gpt_response['choices'][0]['message']['content'].strip()
-            
-            # Convert the AI's Markdown response to basic HTML for the report
-            html_content = summary_markdown.replace('\n', '<br>')
-            html_content = re.sub(r'# (.*)', r'<h1>\1</h1>', html_content)
-            html_content = re.sub(r'## (.*)', r'<h2>\1</h2>', html_content)
-            html_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html_content)
-            html_content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html_content)
-            html_content = re.sub(r'❌ Not addressed.', r'<span class="not-addressed">❌ Not addressed.</span>', html_content)
-            
-            final_html = HTML_TEMPLATE.format(report_content=html_content)
-            
-            provider = extract_provider(summary_markdown)
-            timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
-            filename = f"{timestamp} - {provider}_Consultation_Summary.html" # Changed to .html
-
-            upload_to_drive(filename, final_html.encode("utf-8"), mime_type="text/html")
-            
-            print(f"✅ Successfully processed transcript for meeting {meeting_object.get('topic')}")
-            return JSONResponse(content={"status": "processed"}, status_code=200)
-
-        except requests.exceptions.HTTPError as http_err:
-            print(f"❌ HTTP error occurred: {http_err}")
-            if http_err.response:
-                print(f"❌ Zoom API Response Body: {http_err.response.text}")
-            raise HTTPException(status_code=500, detail=f"Zoom API Error: {http_err.response.text if http_err.response else 'Unknown'}")
-        except Exception as e:
-            print(f"❌ An unexpected error occurred during processing: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+        # --- FIX: Run the job in the background ---
+        # This immediately responds to Zoom to prevent timeouts and retries.
+        background_tasks.add_task(process_transcript_task, body)
+        return JSONResponse(content={"status": "processing_started"}, status_code=202)
 
     print(f"ℹ️ Received and ignored event: {event}")
     return JSONResponse(content={"message": "Event ignored"}, status_code=200)

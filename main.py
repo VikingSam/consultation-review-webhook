@@ -150,7 +150,6 @@ async def zoom_webhook(request: Request):
             payload = body.get("payload", {})
             meeting_object = payload.get("object", {})
             
-            # --- THE FINAL FIX: Correctly handle all Meeting and Webinar types ---
             meeting_type = meeting_object.get("type")
             entity_id = meeting_object.get("uuid")
             duration = meeting_object.get("duration", "Not available")
@@ -166,7 +165,6 @@ async def zoom_webhook(request: Request):
             if not entity_id:
                 raise ValueError(f"Entity ID (UUID) not found in webhook payload for type {entity_type}")
             
-            # Per Zoom API docs, UUIDs with slashes must be double URL encoded to work in the API path.
             if entity_id.startswith('/') or '//' in entity_id:
                 entity_id = requests.utils.quote(requests.utils.quote(entity_id, safe=''))
 
@@ -175,7 +173,6 @@ async def zoom_webhook(request: Request):
             zoom_access_token = get_zoom_access_token()
             headers = {"Authorization": f"Bearer {zoom_access_token}"}
             
-            # Use the Zoom API to get recording details, which provides a new, authorized download URL
             recording_details_url = f"https://api.zoom.us/v2/{entity_type}/{entity_id}/recordings"
             
             recording_details_response = requests.get(recording_details_url, headers=headers)
@@ -194,15 +191,12 @@ async def zoom_webhook(request: Request):
             download_url = transcript_file["download_url"]
             print(f"ℹ️ Found authorized download URL via API: {download_url}")
 
-            # Download the transcript using the same powerful token
             transcript_response = requests.get(download_url, headers=headers)
             transcript_response.raise_for_status()
             transcript_text = transcript_response.text
 
-            # Format the prompt with the actual duration
             formatted_prompt = CONSULTATION_FRAMEWORK.format(duration=f"{duration} minutes")
 
-            # Analyze the transcript with OpenAI
             gpt_response = openai.ChatCompletion.create(
                 model="gpt-4o",
                 messages=[
@@ -221,6 +215,8 @@ async def zoom_webhook(request: Request):
             upload_to_drive(filename, summary.encode("utf-8"))
             
             print(f"✅ Successfully processed transcript for meeting {meeting_object.get('topic')}")
+            # --- FIX: Stop processing after the first transcript ---
+            # This prevents creating duplicate files if Zoom sends multiple transcript files.
             return JSONResponse(content={"status": "processed"}, status_code=200)
 
         except requests.exceptions.HTTPError as http_err:

@@ -98,8 +98,7 @@ HTML_TEMPLATE = """
 
 app = FastAPI()
 
-# --- NEW: In-memory set to track currently processing meetings ---
-# This provides an immediate check to prevent race conditions from duplicate webhooks.
+# In-memory set to track currently processing meetings to prevent race conditions.
 PROCESSING_MEETING_IDS = set()
 
 def get_google_access_token():
@@ -239,7 +238,7 @@ async def process_transcript_task(body: dict):
     except Exception as e:
         print(f"❌ An error occurred during background processing: {e}")
     finally:
-        # --- NEW: Remove the ID from the processing set when done ---
+        # Remove the ID from the processing set when done or if an error occurs.
         if entity_id and entity_id in PROCESSING_MEETING_IDS:
             PROCESSING_MEETING_IDS.remove(entity_id)
 
@@ -257,7 +256,6 @@ async def zoom_webhook(request: Request, background_tasks: BackgroundTasks):
         meeting_object = body.get("payload", {}).get("object", {})
         entity_id = meeting_object.get("uuid")
 
-        # --- PRIMARY FIX: Check in-memory set before starting ---
         if entity_id in PROCESSING_MEETING_IDS:
             print(f"✅ Duplicate webhook for meeting {entity_id} received. Ignoring.")
             return JSONResponse(content={"status": "already_processing"}, status_code=200)

@@ -80,7 +80,7 @@ def get_google_access_token():
         return response.json()["access_token"]
     else:
         print(f"❌ Failed to refresh Google token: {response.text}")
-        raise Exception(f"❌ Failed to refresh Google token: {response.text}")
+        raise HTTPException(status_code=500, detail="Failed to refresh Google token")
 
 def get_zoom_access_token():
     """Gets a Server-to-Server OAuth token from Zoom."""
@@ -95,7 +95,7 @@ def get_zoom_access_token():
         return response.json()["access_token"]
     else:
         print(f"❌ Failed to get Zoom access token: {response.status_code} - {response.text}")
-        raise Exception("Failed to get Zoom access token")
+        raise HTTPException(status_code=500, detail="Failed to get Zoom access token")
 
 def extract_provider(text):
     """Extracts the provider's name from the summary text for the filename."""
@@ -127,6 +127,8 @@ def upload_to_drive(filename, filedata):
         response.raise_for_status()
     except Exception as e:
         print(f"❌ Error uploading to Google Drive: {e}")
+        # Re-raise the exception to be caught by the main handler
+        raise e
 
 
 @app.post("/webhook")
@@ -145,44 +147,70 @@ async def zoom_webhook(request: Request):
         return JSONResponse(content={"plainToken": plain_token, "encryptedToken": encrypted_token})
 
     if event == "recording.transcript_completed":
-        payload = body.get("payload", {})
-        recording_files = payload.get("object", {}).get("recording_files", [])
-        
-        for file in recording_files:
-            if file.get("file_type") == "TRANSCRIPT":
-                download_url = file.get("download_url")
-                
-                try:
-                    zoom_access_token = get_zoom_access_token()
-                    headers = {"Authorization": f"Bearer {zoom_access_token}"}
-                    
-                    transcript_response = requests.get(download_url, headers=headers)
-                    transcript_response.raise_for_status()
-                    transcript_text = transcript_response.text
+        try:
+            payload = body.get("payload", {})
+            meeting_object = payload.get("object", {})
+            meeting_uuid = meeting_object.get("uuid")
+            
+            if not meeting_uuid:
+                raise ValueError("Meeting UUID not found in webhook payload")
 
-                    gpt_response = openai.ChatCompletion.create(
-                        model="gpt-4o",
-                        messages=[
-                            {"role": "system", "content": CONSULTATION_FRAMEWORK},
-                            {"role": "user", "content": transcript_text}
-                        ],
-                        temperature=0.5,
-                        max_tokens=1500
-                    )
-                    summary = gpt_response['choices'][0]['message']['content'].strip()
-                    
-                    provider = extract_provider(summary)
-                    timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
-                    filename = f"{timestamp} - {provider}_Consultation_Summary.txt"
+            print(f"ℹ️ Processing transcript for meeting UUID: {meeting_uuid}")
 
-                    upload_to_drive(filename, summary.encode("utf-8"))
-                    
-                    print(f"✅ Successfully processed transcript for meeting {payload.get('object', {}).get('topic')}")
-                    return JSONResponse(content={"status": "processed"}, status_code=200)
+            zoom_access_token = get_zoom_access_token()
+            headers = {"Authorization": f"Bearer {zoom_access_token}"}
+            
+            # --- NEW, MORE ROBUST METHOD ---
+            # Use the Zoom API to get recording details, which provides an authorized download URL
+            recording_details_url = f"https://api.zoom.us/v2/meetings/{meeting_uuid}/recordings"
+            recording_details_response = requests.get(recording_details_url, headers=headers)
+            recording_details_response.raise_for_status()
+            recording_details = recording_details_response.json()
 
-                except Exception as e:
-                    print(f"❌ An error occurred during processing: {e}")
-                    return JSONResponse(content={"status": "error", "detail": str(e)}, status_code=500)
+            transcript_file = None
+            for file in recording_details.get("recording_files", []):
+                if file.get("file_type") == "TRANSCRIPT":
+                    transcript_file = file
+                    break
+            
+            if not transcript_file or "download_url" not in transcript_file:
+                raise ValueError("Transcript file or download URL not found in API response")
+
+            download_url = transcript_file["download_url"]
+            print(f"ℹ️ Found authorized download URL via API: {download_url}")
+
+            # Download the transcript using the same authorized token
+            transcript_response = requests.get(download_url, headers=headers)
+            transcript_response.raise_for_status()
+            transcript_text = transcript_response.text
+
+            # Analyze the transcript with OpenAI
+            gpt_response = openai.ChatCompletion.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": CONSULTATION_FRAMEWORK},
+                    {"role": "user", "content": transcript_text}
+                ],
+                temperature=0.5,
+                max_tokens=1500
+            )
+            summary = gpt_response['choices'][0]['message']['content'].strip()
+            
+            # Create filename and upload the summary
+            provider = extract_provider(summary)
+            timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
+            filename = f"{timestamp} - {provider}_Consultation_Summary.txt"
+
+            upload_to_drive(filename, summary.encode("utf-8"))
+            
+            print(f"✅ Successfully processed transcript for meeting {meeting_object.get('topic')}")
+            return JSONResponse(content={"status": "processed"}, status_code=200)
+
+        except Exception as e:
+            print(f"❌ An error occurred during processing: {e}")
+            # Use HTTPException to return a proper error response to Zoom
+            raise HTTPException(status_code=500, detail=str(e))
 
     print(f"ℹ️ Received and ignored event: {event}")
     return JSONResponse(content={"message": "Event ignored"}, status_code=200)
+

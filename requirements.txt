@@ -2,7 +2,6 @@ fastapi
 uvicorn
 requests
 openai==0.28
-pydantic
-google-auth
 google-api-python-client
 google-auth-oauthlib
+weasyprint

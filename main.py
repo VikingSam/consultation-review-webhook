@@ -41,9 +41,8 @@ openai.api_key = config["OPENAI_API_KEY"]
 CONSULTATION_FRAMEWORK_PROMPT = """
 You are a medical consultation analyst. Your task is to extract specific pieces of information from the provided transcript.
 
-Respond with a JSON object with the following keys: "provider_name", "patient_name", "overall_score", "key_takeaways", and "framework_analysis".
+Respond with a JSON object with the following keys: "patient_name", "overall_score", "key_takeaways", and "framework_analysis".
 
-- "provider_name": Infer the provider's full name.
 - "patient_name": Extract the patient's full name. If not found, use "Unknown Patient".
 - "overall_score": A score from 1-10 based on the completeness of the 15-point framework.
 - "key_takeaways": A brief, 2-3 sentence summary of the consultation.
@@ -121,7 +120,6 @@ app = FastAPI()
 PROCESSING_MEETING_IDS = set()
 
 def get_google_access_token():
-    # This function remains the same
     token_url = "https://oauth2.googleapis.com/token"
     data = {"client_id": config["GOOGLE_CLIENT_ID"], "client_secret": config["GOOGLE_CLIENT_SECRET"], "refresh_token": config["GOOGLE_REFRESH_TOKEN"], "grant_type": "refresh_token"}
     response = requests.post(token_url, data=data)
@@ -129,7 +127,6 @@ def get_google_access_token():
     return response.json()["access_token"]
 
 def get_zoom_access_token():
-    # This function remains the same
     token_url = "https://zoom.us/oauth/token"
     params = {"grant_type": "account_credentials", "account_id": config["ZOOM_ACCOUNT_ID"]}
     auth = (config["ZOOM_CLIENT_ID"], config["ZOOM_CLIENT_SECRET"])
@@ -139,7 +136,6 @@ def get_zoom_access_token():
     return response.json()["access_token"]
 
 def upload_to_drive(filename, filedata, mime_type):
-    # This function remains the same
     access_token = get_google_access_token()
     headers = {"Authorization": f"Bearer {access_token}"}
     metadata = {"name": filename, "parents": [config["GOOGLE_DRIVE_FOLDER_ID"]]}
@@ -149,7 +145,6 @@ def upload_to_drive(filename, filedata, mime_type):
     response.raise_for_status()
 
 def is_already_processed(meeting_uuid):
-    # This function remains the same
     try:
         access_token = get_google_access_token()
         headers = {"Authorization": f"Bearer {access_token}"}
@@ -164,6 +159,15 @@ def is_already_processed(meeting_uuid):
     except Exception as e:
         print(f"⚠️ Could not check for existing file. Error: {e}")
         return False
+        
+def format_provider_from_email(email):
+    """Cleans an email address into a formatted name."""
+    if not email or '@' not in email:
+        return "Unknown_Provider"
+    name_part = email.split('@')[0]
+    # Replace dots with spaces and capitalize
+    formatted_name = name_part.replace('.', ' ').title()
+    return formatted_name
 
 async def process_transcript_task(body: dict):
     entity_id = None
@@ -177,6 +181,9 @@ async def process_transcript_task(body: dict):
 
         duration = meeting_object.get("duration", 0)
         meeting_type = meeting_object.get("type")
+        host_email = meeting_object.get("host_email")
+        
+        provider_name = format_provider_from_email(host_email)
 
         if meeting_type in [1, 2, 3, 4, 8]: entity_type = "meetings"
         elif meeting_type in [5, 6, 9]: entity_type = "webinars"
@@ -220,7 +227,7 @@ async def process_transcript_task(body: dict):
 
         # Populate the template
         template_fillers = {
-            "provider_name": report_data.get("provider_name", "N/A"),
+            "provider_name": provider_name.replace("_", " "),
             "patient_name": report_data.get("patient_name", "N/A"),
             "duration": f"{duration} minutes",
             "overall_score": report_data.get("overall_score", "N/A"),
@@ -237,10 +244,9 @@ async def process_transcript_task(body: dict):
         pdf_bytes = HTML(string=final_html).write_pdf()
         
         # Create filename
-        provider_sanitized = re.sub(r"[^\w\s-]", "", report_data.get("provider_name", "UnknownProvider")).replace(" ", "_")
         patient_sanitized = re.sub(r"[^\w\s-]", "", report_data.get("patient_name", "UnknownPatient")).replace(" ", "_")
         timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
-        filename = f"{timestamp} - {provider_sanitized} - {patient_sanitized}_Summary.pdf"
+        filename = f"{timestamp} - {provider_name.replace(' ', '_')} - {patient_sanitized}_Summary.pdf"
 
         upload_to_drive(filename, pdf_bytes, "application/pdf")
         

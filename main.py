@@ -154,7 +154,8 @@ async def zoom_webhook(request: Request):
             # --- THE FINAL FIX: Correctly handle all Meeting and Webinar types ---
             meeting_type = meeting_object.get("type")
 
-            if meeting_type in [1, 2, 3, 8]: # It's a meeting (Instant, Scheduled, or Recurring)
+            # Types 1, 2, 3, 4, and 8 are all meetings (Instant, Scheduled, Recurring, PMI)
+            if meeting_type in [1, 2, 3, 4, 8]: 
                 entity_type = "meetings"
                 entity_id = meeting_object.get("uuid")
             elif meeting_type in [5, 6, 9]: # It's a webinar

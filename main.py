@@ -11,13 +11,15 @@ from datetime import datetime, timedelta
 import re
 from weasyprint import HTML
 import markdown2
+import pytz
 
 # === LOAD CONFIGURATION FROM ENVIRONMENT VARIABLES ===
 def load_env_vars():
     required_vars = [
         "GOOGLE_DRIVE_FOLDER_ID", "OPENAI_API_KEY", "ZOOM_SECRET_TOKEN",
         "ZOOM_ACCOUNT_ID", "ZOOM_CLIENT_ID", "ZOOM_CLIENT_SECRET",
-        "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"
+        "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN",
+        "SMTP_SERVER", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "ALERT_EMAIL_RECIPIENTS"
     ]
     config = {}
     for var in required_vars:
@@ -164,22 +166,17 @@ def is_already_processed(meeting_uuid):
         return False
         
 def format_provider_from_email(email):
-    """Cleans an email address into a formatted name."""
     if not email or '@' not in email:
         return "Unknown_Provider"
     name_part = email.split('@')[0]
-    # Replace dots with spaces and capitalize
     formatted_name = name_part.replace('.', ' ').title()
     return formatted_name
 
-# --- NEW FUNCTION to calculate duration from transcript ---
 def get_duration_from_transcript(vtt_text):
-    """Parses a VTT transcript to find the actual duration of the conversation."""
     timestamps = re.findall(r"(\d{2}:\d{2}:\d{2}\.\d{3})", vtt_text)
     if not timestamps:
         return "Not available"
     
-    # Helper to convert VTT time to a timedelta object
     def time_to_delta(t):
         h, m, s_ms = t.split(':')
         s, ms = s_ms.split('.')
@@ -189,12 +186,45 @@ def get_duration_from_transcript(vtt_text):
         start_time = time_to_delta(timestamps[0])
         end_time = time_to_delta(timestamps[-1])
         duration = end_time - start_time
-        # Format as minutes, rounding up
         duration_minutes = int(duration.total_seconds() / 60) + (1 if duration.total_seconds() % 60 > 0 else 0)
         return f"{duration_minutes} minutes"
     except Exception as e:
         print(f"⚠️ Could not parse transcript duration: {e}")
         return "Not available"
+
+def send_alert_email(report_data, provider_name, pdf_bytes, filename):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = config["SMTP_USERNAME"]
+        recipients = [email.strip() for email in config["ALERT_EMAIL_RECIPIENTS"].split(',')]
+        msg['To'] = ", ".join(recipients)
+        
+        patient_name = report_data.get("patient_name", "N/A")
+        score = report_data.get("overall_score", "N/A")
+        
+        msg['Subject'] = f"Low Score Alert for Consultation: {provider_name} / {patient_name} (Score: {score}/10)"
+
+        body = f"""
+        <p>A consultation has been flagged for review due to a low score.</p>
+        <p><strong>Provider:</strong> {provider_name}</p>
+        <p><strong>Patient:</strong> {patient_name}</p>
+        <p><strong>Score:</strong> {score}/10</p>
+        <p>The full consultation summary is attached as a PDF.</p>
+        """
+        msg.attach(MIMEText(body, 'html'))
+
+        attachment = MIMEApplication(pdf_bytes, _subtype="pdf")
+        attachment.add_header('Content-Disposition', 'attachment', filename=filename)
+        msg.attach(attachment)
+
+        with smtplib.SMTP(config["SMTP_SERVER"], int(config["SMTP_PORT"])) as server:
+            server.starttls()
+            server.login(config["SMTP_USERNAME"], config["SMTP_PASSWORD"])
+            server.send_message(msg)
+            print(f"✅ Successfully sent low score alert email to {msg['To']}")
+
+    except Exception as e:
+        print(f"❌ Failed to send alert email: {e}")
 
 
 async def process_transcript_task(body: dict):
@@ -211,13 +241,16 @@ async def process_transcript_task(body: dict):
         host_email = meeting_object.get("host_email")
         start_time_str = meeting_object.get("start_time", "")
         
+        # --- NEW: Convert timestamp to Central Standard Time ---
         consult_date = "Not available"
         if start_time_str:
             try:
-                dt_object = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                consult_date = dt_object.strftime('%B %d, %Y at %I:%M %p %Z')
-            except ValueError:
-                print(f"⚠️ Could not parse date: {start_time_str}")
+                utc_dt = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                cst_zone = pytz.timezone('America/Chicago')
+                cst_dt = utc_dt.astimezone(cst_zone)
+                consult_date = cst_dt.strftime('%B %d, %Y at %I:%M %p %Z')
+            except (ValueError, pytz.UnknownTimeZoneError) as e:
+                print(f"⚠️ Could not parse or convert date: {start_time_str}. Error: {e}")
 
         provider_name = format_provider_from_email(host_email)
 
@@ -249,10 +282,8 @@ async def process_transcript_task(body: dict):
         transcript_response.raise_for_status()
         transcript_text = transcript_response.text
 
-        # --- USE NEW DURATION CALCULATION ---
         actual_duration = get_duration_from_transcript(transcript_text)
 
-        # Get structured data from AI
         gpt_response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
@@ -264,12 +295,11 @@ async def process_transcript_task(body: dict):
         )
         report_data = json.loads(gpt_response['choices'][0]['message']['content'])
 
-        # Populate the template
         template_fillers = {
             "provider_name": provider_name.replace("_", " "),
             "patient_name": report_data.get("patient_name", "N/A"),
             "consult_date": consult_date,
-            "duration": actual_duration, # Use the accurate duration
+            "duration": actual_duration,
             "overall_score": report_data.get("overall_score", "N/A"),
             "key_takeaways": report_data.get("key_takeaways", "N/A"),
             "anomalous_content": report_data.get("anomalous_content", "N/A")
@@ -279,12 +309,10 @@ async def process_transcript_task(body: dict):
             
         final_markdown = REPORT_TEMPLATE_MD.format(**template_fillers)
         
-        # Convert to PDF
         html_content = markdown2.markdown(final_markdown, extras=["tables"])
         final_html = HTML_SHELL.format(content=html_content)
         pdf_bytes = HTML(string=final_html).write_pdf()
         
-        # Create filename
         patient_sanitized = re.sub(r"[^\w\s-]", "", report_data.get("patient_name", "UnknownPatient")).replace(" ", "_")
         timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
         
@@ -292,6 +320,11 @@ async def process_transcript_task(body: dict):
 
         upload_to_drive(filename, pdf_bytes, "application/pdf")
         
+        score = int(report_data.get("overall_score", 10))
+        if score <= 7:
+            print(f"⚠️ Low score detected ({score}/10). Sending alert email.")
+            send_alert_email(report_data, provider_name.replace("_", " "), pdf_bytes, filename)
+
         print(f"✅ Successfully processed transcript for meeting {meeting_object.get('topic')}")
 
     except Exception as e:

@@ -7,7 +7,7 @@ import openai
 import json
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 from weasyprint import HTML
 import markdown2
@@ -172,6 +172,31 @@ def format_provider_from_email(email):
     formatted_name = name_part.replace('.', ' ').title()
     return formatted_name
 
+# --- NEW FUNCTION to calculate duration from transcript ---
+def get_duration_from_transcript(vtt_text):
+    """Parses a VTT transcript to find the actual duration of the conversation."""
+    timestamps = re.findall(r"(\d{2}:\d{2}:\d{2}\.\d{3})", vtt_text)
+    if not timestamps:
+        return "Not available"
+    
+    # Helper to convert VTT time to a timedelta object
+    def time_to_delta(t):
+        h, m, s_ms = t.split(':')
+        s, ms = s_ms.split('.')
+        return timedelta(hours=int(h), minutes=int(m), seconds=int(s), milliseconds=int(ms))
+
+    try:
+        start_time = time_to_delta(timestamps[0])
+        end_time = time_to_delta(timestamps[-1])
+        duration = end_time - start_time
+        # Format as minutes, rounding up
+        duration_minutes = int(duration.total_seconds() / 60) + (1 if duration.total_seconds() % 60 > 0 else 0)
+        return f"{duration_minutes} minutes"
+    except Exception as e:
+        print(f"⚠️ Could not parse transcript duration: {e}")
+        return "Not available"
+
+
 async def process_transcript_task(body: dict):
     entity_id = None
     try:
@@ -182,7 +207,6 @@ async def process_transcript_task(body: dict):
         if is_already_processed(entity_id):
             return
 
-        duration = meeting_object.get("duration", 0)
         meeting_type = meeting_object.get("type")
         host_email = meeting_object.get("host_email")
         start_time_str = meeting_object.get("start_time", "")
@@ -225,6 +249,9 @@ async def process_transcript_task(body: dict):
         transcript_response.raise_for_status()
         transcript_text = transcript_response.text
 
+        # --- USE NEW DURATION CALCULATION ---
+        actual_duration = get_duration_from_transcript(transcript_text)
+
         # Get structured data from AI
         gpt_response = openai.ChatCompletion.create(
             model="gpt-4o",
@@ -242,7 +269,7 @@ async def process_transcript_task(body: dict):
             "provider_name": provider_name.replace("_", " "),
             "patient_name": report_data.get("patient_name", "N/A"),
             "consult_date": consult_date,
-            "duration": f"{duration} minutes",
+            "duration": actual_duration, # Use the accurate duration
             "overall_score": report_data.get("overall_score", "N/A"),
             "key_takeaways": report_data.get("key_takeaways", "N/A"),
             "anomalous_content": report_data.get("anomalous_content", "N/A")

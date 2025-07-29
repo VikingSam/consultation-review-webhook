@@ -144,7 +144,7 @@ def upload_to_drive(filename, filedata, mime_type):
     metadata = {"name": filename, "parents": [config["GOOGLE_DRIVE_FOLDER_ID"]]}
     files = {"data": ("metadata", json.dumps(metadata), "application/json"), "file": (filename, filedata, mime_type)}
     response = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", headers=headers, files=files)
-    print("📤 Google Drive upload response:", response.status_code, response.text)
+    print(f"📤 Google Drive upload response: {response.status_code}, {response.text}")
     response.raise_for_status()
 
 def is_already_processed(meeting_uuid):

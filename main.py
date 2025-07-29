@@ -143,29 +143,4 @@ def upload_to_drive(filename, filedata, mime_type):
     metadata = {"name": filename, "parents": [config["GOOGLE_DRIVE_FOLDER_ID"]]}
     files = {"data": ("metadata", json.dumps(metadata), "application/json"), "file": (filename, filedata, mime_type)}
     response = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", headers=headers, files=files)
-    print("📤 Google Drive upload response:", response.status_code, response.text)
-    response.raise_for_status()
-
-def is_already_processed(meeting_uuid):
-    try:
-        access_token = get_google_access_token()
-        headers = {"Authorization": f"Bearer {access_token}"}
-        query = f"name contains '{meeting_uuid}' and '{config['GOOGLE_DRIVE_FOLDER_ID']}' in parents and trashed=false"
-        params = {'q': query, 'fields': 'files(id)'}
-        response = requests.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
-        response.raise_for_status()
-        if response.json().get("files"):
-            print(f"✅ Report for meeting {meeting_uuid} already exists. Skipping.")
-            return True
-        return False
-    except Exception as e:
-        print(f"⚠️ Could not check for existing file. Error: {e}")
-        return False
-        
-def format_provider_from_email(email):
-    """Cleans an email address into a formatted name."""
-    if not email or '@' not in email:
-        return "Unknown_Provider"
-    name_part = email.split('@')[0]
-    # Replace dots with spaces and capitalize
-    formatted_name = name_part.repl
+    print("📤 Google Drive upload response:", response.status_code, response.t

@@ -187,13 +187,10 @@ async def process_transcript_task(body: dict):
         host_email = meeting_object.get("host_email")
         start_time_str = meeting_object.get("start_time", "")
         
-        # --- NEW: Format the date and time ---
         consult_date = "Not available"
         if start_time_str:
             try:
-                # Parse the ISO 8601 timestamp from Zoom
                 dt_object = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                # Format it into a more readable string
                 consult_date = dt_object.strftime('%B %d, %Y at %I:%M %p %Z')
             except ValueError:
                 print(f"⚠️ Could not parse date: {start_time_str}")
@@ -244,7 +241,7 @@ async def process_transcript_task(body: dict):
         template_fillers = {
             "provider_name": provider_name.replace("_", " "),
             "patient_name": report_data.get("patient_name", "N/A"),
-            "consult_date": consult_date, # --- NEW: Add formatted date to template ---
+            "consult_date": consult_date,
             "duration": f"{duration} minutes",
             "overall_score": report_data.get("overall_score", "N/A"),
             "key_takeaways": report_data.get("key_takeaways", "N/A"),
@@ -264,7 +261,6 @@ async def process_transcript_task(body: dict):
         patient_sanitized = re.sub(r"[^\w\s-]", "", report_data.get("patient_name", "UnknownPatient")).replace(" ", "_")
         timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
         
-        # --- CORRECTED FILENAME with unique meeting ID ---
         filename = f"{timestamp} - {provider_name.replace(' ', '_')} - {patient_sanitized} - {entity_id}_Summary.pdf"
 
         upload_to_drive(filename, pdf_bytes, "application/pdf")

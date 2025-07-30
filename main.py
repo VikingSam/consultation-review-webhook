@@ -170,9 +170,11 @@ def is_already_processed(meeting_uuid):
         return False
         
 def format_provider_from_email(email):
+    """Cleans an email address into a formatted name."""
     if not email or '@' not in email:
         return "Unknown_Provider"
     name_part = email.split('@')[0]
+    # Replace dots with spaces and capitalize
     formatted_name = name_part.replace('.', ' ').title()
     return formatted_name
 
@@ -241,6 +243,7 @@ async def process_transcript_task(body: dict):
         if is_already_processed(entity_id):
             return
 
+        duration = meeting_object.get("duration", 0)
         meeting_type = meeting_object.get("type")
         host_email = meeting_object.get("host_email")
         start_time_str = meeting_object.get("start_time", "")
@@ -248,7 +251,7 @@ async def process_transcript_task(body: dict):
         consult_date = "Not available"
         if start_time_str:
             try:
-                utc_dt = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                dt_object = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
                 cst_zone = pytz.timezone('America/Chicago')
                 cst_dt = utc_dt.astimezone(cst_zone)
                 consult_date = cst_dt.strftime('%B %d, %Y at %I:%M %p %Z')
@@ -307,7 +310,7 @@ async def process_transcript_task(body: dict):
             "key_takeaways": report_data.get("key_takeaways", "N/A"),
             "anomalous_content": report_data.get("anomalous_content", "N/A")
         }
-        for i, analysis in enumerate(report_data.get("framework_analysis", []), 1):
+        for i, analysis in enumerate(report_data.get("framework_analysis", [])):
             template_fillers[f"framework_{i}"] = analysis
             
         final_markdown = REPORT_TEMPLATE_MD.format(**template_fillers)
@@ -323,11 +326,9 @@ async def process_transcript_task(body: dict):
 
         upload_to_drive(filename, pdf_bytes, "application/pdf")
         
-        # --- FIX: Robustly parse the score before checking it ---
-        score = 10 # Default to a high score to prevent accidental alerts
+        score = 10 
         score_str = str(report_data.get("overall_score", "10"))
         try:
-            # Find the first number in the string (e.g., "7" from "7/10")
             score_match = re.search(r'\d+', score_str)
             if score_match:
                 score = int(score_match.group(0))

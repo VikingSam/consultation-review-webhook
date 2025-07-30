@@ -12,6 +12,10 @@ import re
 from weasyprint import HTML
 import markdown2
 import pytz
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 
 # === LOAD CONFIGURATION FROM ENVIRONMENT VARIABLES ===
 def load_env_vars():
@@ -241,7 +245,6 @@ async def process_transcript_task(body: dict):
         host_email = meeting_object.get("host_email")
         start_time_str = meeting_object.get("start_time", "")
         
-        # --- NEW: Convert timestamp to Central Standard Time ---
         consult_date = "Not available"
         if start_time_str:
             try:
@@ -320,7 +323,18 @@ async def process_transcript_task(body: dict):
 
         upload_to_drive(filename, pdf_bytes, "application/pdf")
         
-        score = int(report_data.get("overall_score", 10))
+        # --- FIX: Robustly parse the score before checking it ---
+        score = 10 # Default to a high score to prevent accidental alerts
+        score_str = str(report_data.get("overall_score", "10"))
+        try:
+            # Find the first number in the string (e.g., "7" from "7/10")
+            score_match = re.search(r'\d+', score_str)
+            if score_match:
+                score = int(score_match.group(0))
+        except (ValueError, TypeError):
+            print(f"⚠️ Could not parse score '{score_str}'. Defaulting to 10.")
+        
+        print(f"ℹ️ Parsed score for alert check: {score}")
         if score <= 7:
             print(f"⚠️ Low score detected ({score}/10). Sending alert email.")
             send_alert_email(report_data, provider_name.replace("_", " "), pdf_bytes, filename)

@@ -39,7 +39,7 @@ except ValueError as e:
     print(e)
     exit(1)
 
-# Set the OpenAI API key
+# Set the OpenAI API key for the library
 openai.api_key = config["OPENAI_API_KEY"]
 
 
@@ -253,7 +253,8 @@ async def process_transcript_task(body: dict):
             try:
                 dt_object = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
                 cst_zone = pytz.timezone('America/Chicago')
-                cst_dt = utc_dt.astimezone(cst_zone)
+                # **FIXED**: Changed utc_dt to dt_object
+                cst_dt = dt_object.astimezone(cst_zone) 
                 consult_date = cst_dt.strftime('%B %d, %Y at %I:%M %p %Z')
             except (ValueError, pytz.UnknownTimeZoneError) as e:
                 print(f"⚠️ Could not parse or convert date: {start_time_str}. Error: {e}")
@@ -290,7 +291,9 @@ async def process_transcript_task(body: dict):
 
         actual_duration = get_duration_from_transcript(transcript_text)
 
-        gpt_response = openai.ChatCompletion.create(
+        # **FIXED**: Updated to OpenAI v1.x+ syntax
+        client = openai.OpenAI(api_key=config["OPENAI_API_KEY"])
+        gpt_response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": CONSULTATION_FRAMEWORK_PROMPT},
@@ -299,8 +302,9 @@ async def process_transcript_task(body: dict):
             response_format={"type": "json_object"},
             temperature=0.5
         )
-        report_data = json.loads(gpt_response['choices'][0]['message']['content'])
+        report_data = json.loads(gpt_response.choices[0].message.content)
 
+        # **FIXED**: Made report generation robust to prevent crashes
         template_fillers = {
             "provider_name": provider_name.replace("_", " "),
             "patient_name": report_data.get("patient_name", "N/A"),
@@ -310,9 +314,17 @@ async def process_transcript_task(body: dict):
             "key_takeaways": report_data.get("key_takeaways", "N/A"),
             "anomalous_content": report_data.get("anomalous_content", "N/A")
         }
-        for i, analysis in enumerate(report_data.get("framework_analysis", [])):
-            template_fillers[f"framework_{i}"] = analysis
-            
+        
+        # Pre-populate all 15 framework points with a default value
+        for i in range(1, 16):
+            template_fillers[f"framework_{i}"] = "Not addressed."
+        
+        # Overwrite the defaults with any analysis provided by the AI
+        framework_items = report_data.get("framework_analysis", [])
+        for i, analysis in enumerate(framework_items, start=1):
+            if i <= 15: # Ensure we don't go beyond our 15 points
+                template_fillers[f"framework_{i}"] = analysis
+                
         final_markdown = REPORT_TEMPLATE_MD.format(**template_fillers)
         
         html_content = markdown2.markdown(final_markdown, extras=["tables"])

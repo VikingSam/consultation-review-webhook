@@ -1,3 +1,12 @@
+You're right, my apologies. That link points to our previous conversation, but I'll provide the full code directly here to avoid any confusion.
+
+Please use this code to replace the entire contents of your `main.py` file on GitHub.
+
+-----
+
+### \#\# Corrected `main.py` Code
+
+```python
 #!/usr/bin/env python3
 import os
 import hmac
@@ -383,3 +392,4 @@ async def zoom_webhook(request: Request, background_tasks: BackgroundTasks):
         return JSONResponse(content={"status": "processing_started"}, status_code=202)
 
     return JSONResponse(content={"message": "Event ignored"}, status_code=200)
+```

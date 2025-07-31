@@ -1,12 +1,3 @@
-You're right, my apologies. That link points to our previous conversation, but I'll provide the full code directly here to avoid any confusion.
-
-Please use this code to replace the entire contents of your `main.py` file on GitHub.
-
------
-
-### \#\# Corrected `main.py` Code
-
-```python
 #!/usr/bin/env python3
 import os
 import hmac

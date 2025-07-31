@@ -129,14 +129,14 @@ app = FastAPI()
 PROCESSING_MEETING_IDS = set()
 
 def get_google_access_token():
-    token_url = "https://oauth2.googleapis.com/token"
+    token_url = "[https://oauth2.googleapis.com/token](https://oauth2.googleapis.com/token)"
     data = {"client_id": config["GOOGLE_CLIENT_ID"], "client_secret": config["GOOGLE_CLIENT_SECRET"], "refresh_token": config["GOOGLE_REFRESH_TOKEN"], "grant_type": "refresh_token"}
     response = requests.post(token_url, data=data)
     response.raise_for_status()
     return response.json()["access_token"]
 
 def get_zoom_access_token():
-    token_url = "https://zoom.us/oauth/token"
+    token_url = "[https://zoom.us/oauth/token](https://zoom.us/oauth/token)"
     params = {"grant_type": "account_credentials", "account_id": config["ZOOM_ACCOUNT_ID"]}
     auth = (config["ZOOM_CLIENT_ID"], config["ZOOM_CLIENT_SECRET"])
     response = requests.post(token_url, auth=auth, params=params)
@@ -149,7 +149,7 @@ def upload_to_drive(filename, filedata, mime_type):
     headers = {"Authorization": f"Bearer {access_token}"}
     metadata = {"name": filename, "parents": [config["GOOGLE_DRIVE_FOLDER_ID"]]}
     files = {"data": ("metadata", json.dumps(metadata), "application/json"), "file": (filename, filedata, mime_type)}
-    response = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", headers=headers, files=files)
+    response = requests.post("[https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart](https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart)", headers=headers, files=files)
     print(f"📤 Google Drive upload response: {response.status_code}, {response.text}")
     response.raise_for_status()
 
@@ -159,7 +159,7 @@ def is_already_processed(meeting_uuid):
         headers = {"Authorization": f"Bearer {access_token}"}
         query = f"name contains '{meeting_uuid}' and '{config['GOOGLE_DRIVE_FOLDER_ID']}' in parents and trashed=false"
         params = {'q': query, 'fields': 'files(id)'}
-        response = requests.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
+        response = requests.get("[https://www.googleapis.com/drive/v3/files](https://www.googleapis.com/drive/v3/files)", headers=headers, params=params)
         response.raise_for_status()
         if response.json().get("files"):
             print(f"✅ Report for meeting {meeting_uuid} already exists. Skipping.")
@@ -253,7 +253,6 @@ async def process_transcript_task(body: dict):
             try:
                 dt_object = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
                 cst_zone = pytz.timezone('America/Chicago')
-                # **FIXED**: Changed utc_dt to dt_object
                 cst_dt = dt_object.astimezone(cst_zone) 
                 consult_date = cst_dt.strftime('%B %d, %Y at %I:%M %p %Z')
             except (ValueError, pytz.UnknownTimeZoneError) as e:
@@ -276,7 +275,7 @@ async def process_transcript_task(body: dict):
 
         zoom_access_token = get_zoom_access_token()
         headers = {"Authorization": f"Bearer {zoom_access_token}"}
-        recording_details_url = f"https://api.zoom.us/v2/{entity_type}/{encoded_entity_id}/recordings"
+        recording_details_url = f"[https://api.zoom.us/v2/](https://api.zoom.us/v2/){entity_type}/{encoded_entity_id}/recordings"
         recording_details_response = requests.get(recording_details_url, headers=headers)
         recording_details_response.raise_for_status()
         recording_details = recording_details_response.json()
@@ -291,7 +290,6 @@ async def process_transcript_task(body: dict):
 
         actual_duration = get_duration_from_transcript(transcript_text)
 
-        # **FIXED**: Updated to OpenAI v1.x+ syntax
         client = openai.OpenAI(api_key=config["OPENAI_API_KEY"])
         gpt_response = client.chat.completions.create(
             model="gpt-4o",
@@ -304,7 +302,6 @@ async def process_transcript_task(body: dict):
         )
         report_data = json.loads(gpt_response.choices[0].message.content)
 
-        # **FIXED**: Made report generation robust to prevent crashes
         template_fillers = {
             "provider_name": provider_name.replace("_", " "),
             "patient_name": report_data.get("patient_name", "N/A"),
@@ -383,4 +380,3 @@ async def zoom_webhook(request: Request, background_tasks: BackgroundTasks):
         return JSONResponse(content={"status": "processing_started"}, status_code=202)
 
     return JSONResponse(content={"message": "Event ignored"}, status_code=200)
-```

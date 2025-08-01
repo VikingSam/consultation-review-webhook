@@ -329,7 +329,15 @@ async def process_transcript_task(body: dict):
         pdf_bytes = HTML(string=final_html).write_pdf()
         
         patient_sanitized = re.sub(r"[^\w\s-]", "", report_data.get("patient_name", "UnknownPatient")).replace(" ", "_")
-        timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
+        
+        # Get the current time in a timezone-aware format (UTC)
+        utc_now = datetime.now(pytz.utc)
+        # Define the Central Standard Timezone
+        cst_zone = pytz.timezone('America/Chicago')
+        # Convert the current time to CST
+        cst_now = utc_now.astimezone(cst_zone)
+        # Format the CST time for the filename
+        timestamp = cst_now.strftime("%y-%m-%d_%H-%M")
         
         filename = f"{timestamp} - {provider_name.replace(' ', '_')} - {patient_sanitized} - {entity_id}_Summary.pdf"
 
